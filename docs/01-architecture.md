@@ -167,6 +167,20 @@ call `retry(envelope)` later, optionally with a higher gas limit.
 This is the difference between "a target that reverts on a transient condition
 costs you a retry" and "a target that reverts wedges the channel."
 
+The rule generalises into a taxonomy the gateway applies to every delivery,
+and the wrong response to each class is a live failure mode:
+
+| Class | Examples | Response |
+|---|---|---|
+| Duplicate | same id, any adapter | consume, emit, return |
+| Terminal | malformed, unknown version, wrong chain, expired, forbidden target | mark `Rejected`, emit, return |
+| Parkable | target reverted, strict-mode miss, ACCOUNT mode off | mark `Failed`, emit, return; anyone retries |
+| Transient | paused, under-gassed | **revert**, so the transport redelivers |
+
+The distinguishing question: *will retrying with no change on our side ever
+succeed?* No -> consume. Yes because something external changes -> revert.
+Yes because a human can act -> park.
+
 ### D5. Ordering and delivery guarantees
 
 Assume **at-least-once, unordered** delivery, because that is the weakest

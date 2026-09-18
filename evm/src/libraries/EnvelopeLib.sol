@@ -55,11 +55,21 @@ library EnvelopeLib {
 
     error MalformedEnvelope();
 
-    /// @notice Decode a calldata envelope. Reverts unless the length exactly
-    ///         matches the declared calldata length, so trailing bytes can never
-    ///         ride along unnoticed inside a message that still hashes cleanly.
+    /// @notice Decode a calldata envelope, reverting on a malformed one.
     function decode(bytes calldata env) internal pure returns (Envelope memory e) {
-        if (env.length < HEADER_SIZE) revert MalformedEnvelope();
+        bool ok;
+        (ok, e) = tryDecode(env);
+        if (!ok) revert MalformedEnvelope();
+    }
+
+    /// @notice Decode without reverting. The gateway needs the failure as a
+    ///         value so it can record a malformed envelope as terminally
+    ///         rejected instead of reverting the delivery back to the
+    ///         transport. Requires the length to exactly match the declared
+    ///         calldata length, so trailing bytes can never ride along
+    ///         unnoticed inside a message that still hashes cleanly.
+    function tryDecode(bytes calldata env) internal pure returns (bool ok, Envelope memory e) {
+        if (env.length < HEADER_SIZE) return (false, e);
 
         uint256 p;
         assembly {
@@ -105,8 +115,9 @@ library EnvelopeLib {
         e.mode = uint8(w >> 248);
         uint256 len = uint32(w >> 216);
 
-        if (env.length != HEADER_SIZE + len) revert MalformedEnvelope();
+        if (env.length != HEADER_SIZE + len) return (false, e);
         e.callData = env[HEADER_SIZE:];
+        ok = true;
     }
 
     /// @notice Mirror of the Rust encoder. Present so tests can assert

@@ -35,7 +35,9 @@ use transports::{
     MASK_ALL, MASK_LAYERZERO, MASK_WORMHOLE, TRANSPORT_LAYERZERO, TRANSPORT_WORMHOLE,
 };
 
-declare_id!("BaseCa11er11111111111111111111111111111111");
+// Placeholder program id (Anchor's canonical example key). Replace with the
+// real deployed id via `anchor keys sync` before any deployment.
+declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
 /// Floor on the Base-side gas limit. A message that cannot pay for its own
 /// dispatch overhead is dead on arrival; rejecting it here is cheaper than
@@ -222,23 +224,29 @@ pub mod base_caller {
             BaseCallerError::TransportDisabled
         );
 
-        let msg = &mut ctx.accounts.message;
-        mark_dispatch(msg, MASK_WORMHOLE)?;
+        // Scope the mutable borrow: the CPI below needs `ctx.accounts` again.
+        let (authority, dispatched, expected) = {
+            let msg = &mut ctx.accounts.message;
+            mark_dispatch(msg, MASK_WORMHOLE)?;
+            (msg.authority, msg.dispatched, msg.expected)
+        };
 
+        let wh = ctx
+            .accounts
+            .to_wormhole_accounts(ctx.bumps.wormhole_emitter);
         transports::wormhole::post_message(
             &ctx.accounts.transport,
-            &msg.envelope,
-            &ctx.accounts
-                .to_wormhole_accounts(ctx.bumps.wormhole_emitter),
+            &ctx.accounts.message.envelope,
+            &wh,
             batch_nonce,
         )?;
 
         emit!(CallDispatched {
             transport_id: TRANSPORT_WORMHOLE,
-            sender: msg.authority,
+            sender: authority,
             nonce,
-            dispatched: msg.dispatched,
-            expected: msg.expected,
+            dispatched,
+            expected,
         });
         Ok(())
     }
@@ -255,27 +263,32 @@ pub mod base_caller {
             BaseCallerError::TransportDisabled
         );
 
-        let msg = &mut ctx.accounts.message;
-        mark_dispatch(msg, MASK_LAYERZERO)?;
+        let (authority, dispatched, expected) = {
+            let msg = &mut ctx.accounts.message;
+            mark_dispatch(msg, MASK_LAYERZERO)?;
+            (msg.authority, msg.dispatched, msg.expected)
+        };
 
         // gas_limit lives in the envelope; read it back rather than trusting a
         // caller-supplied duplicate that could disagree with the bytes.
-        let gas_limit = u64::from_be_bytes(msg.envelope[82..90].try_into().unwrap());
+        let envelope = &ctx.accounts.message.envelope;
+        let gas_limit = u64::from_be_bytes(envelope[82..90].try_into().unwrap());
 
+        let lz = ctx.accounts.to_layerzero_accounts(ctx.bumps.oapp);
         transports::layerzero::send(
             &ctx.accounts.transport,
-            &msg.envelope,
-            &ctx.accounts.to_layerzero_accounts(ctx.bumps.oapp),
+            envelope,
+            &lz,
             native_fee,
             gas_limit,
         )?;
 
         emit!(CallDispatched {
             transport_id: TRANSPORT_LAYERZERO,
-            sender: msg.authority,
+            sender: authority,
             nonce,
-            dispatched: msg.dispatched,
-            expected: msg.expected,
+            dispatched,
+            expected,
         });
         Ok(())
     }

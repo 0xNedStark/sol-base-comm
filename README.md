@@ -80,15 +80,20 @@ for both, which is what makes `requiredConfirmations = 2` reachable.
 
 ```
 evm/src/
-  SolanaGateway.sol         entry point: verify, dedupe, quorum, execute, park failures
+  SolanaGateway.sol         entry point: classify every delivery (duplicate / terminal /
+                            parked / transient / execute), dedupe, quorum, version set
   SolanaAccount.sol         per-sender CREATE2 smart account (ACCOUNT mode)
   SolanaCallable.sol        inherit this in target contracts
   Auth.sol                  minimal ownership / pause / reentrancy
   libraries/EnvelopeLib.sol envelope decoder
   adapters/                 WormholeAdapter, LayerZeroAdapter
-  examples/Treasury.sol     worked integration
+  examples/ConfigInvokeTarget.sol
+                            the phase-one target: two Solana authorities, config-version
+                            guard instead of message ordering
 evm/test/
+  gateway.test.js           28 behaviour tests on an in-process Cancun EVM
   envelope-parity.js        Solidity offsets vs. the Rust encoder's actual bytes
+  build.js                  solc-js build to test/out/artifacts.json
 
 solana/programs/base-caller/src/
   lib.rs                    prepare / dispatch_via_* / finalize, accounts, validation
@@ -127,13 +132,14 @@ This is a design plus a reference implementation, not audited production code.
 
 | | |
 |---|---|
-| Solidity (11 files) | **compiles clean** — solc 0.8.28, cancun, optimizer on |
-| `envelope.rs` | **4 unit tests pass**, incl. a frozen golden vector |
-| Cross-language parity | **verified** — Solidity offsets/shifts checked against the bytes Rust actually emits (`evm/test/envelope-parity.js`) |
-| Anchor program | reference skeleton, **not built** — needs the Solana toolchain |
+| Solidity (12 files) | **compiles clean** — solc 0.8.28, cancun, optimizer on |
+| Gateway tests | **28/28 pass** on an in-process EVM: every failure-taxonomy row, replay, quorum, gas floor, retry, strict mode, ACCOUNT mode, T11 account-drain attempt, config-version pattern end to end |
+| `envelope.rs` | **5 unit tests pass**, incl. a frozen golden vector |
+| Cross-language parity | **verified** — Solidity offsets/shifts checked against the bytes Rust actually emits |
+| Anchor program | **type-checks** against anchor-lang 0.30.1 (`cargo check`); not yet built for SBF or run on a validator |
 | `transports/wormhole.rs` | skeleton; account ordering and the fee layout need checking against the deployed core bridge |
 | `transports/layerzero.rs` | deliberate stub — wire to the official Solana OApp SDK rather than hand-encoding the endpoint CPI |
-| Solidity tests | none yet |
+| Testnet end to end | **not done** — the one thing nothing above covers |
 
 **Constants to verify before deploying anything with value.** The docs sites for
 LayerZero and Wormhole were not reachable from the environment this was written
@@ -142,13 +148,35 @@ endpoint id (30168). Unverified and marked in-source: LayerZero's Base endpoint
 id (believed 30184), Wormhole's numeric consistency-level encoding, core bridge
 account ordering, and the bridge config fee offset.
 
+## Running the checks
+
+```
+# EVM: build + 28 gateway tests + cross-language parity
+cd evm && npm install && npm test
+
+# Solana: type-check against real anchor-lang (no SBF toolchain needed)
+cd solana && cargo check -p base-caller
+
+# Envelope codec unit tests (standalone, no Anchor needed)
+# copy envelope.rs into a plain crate and `cargo test`, or run inside the program crate
+```
+
+## Phase one scope, as built
+
+Per the design doc's decisions: DIRECT mode only (ACCOUNT mode is present but
+gated off by default), `value` reserved-zero, one internal chain registry
+(`1 = Solana, 2 = Ethereum, 3 = Base`), two Solana authorities per target with
+a config-version guard rather than message ordering, and the failure taxonomy
+enforced in the gateway -- revert only when redelivery could succeed.
+
 ## Next steps
 
-1. Foundry tests for `SolanaGateway`: replay, quorum, expiry, the 63/64 gas
-   floor, retry, and ACCOUNT-mode deployment determinism.
-2. Verify the constants above and pin them.
-3. Build the Anchor program and get one message end to end on devnet -> Base
-   Sepolia.
-4. Wire `transports/layerzero.rs` to the official SDK, and add a `quote`
-   instruction so clients can size fees.
-5. Audit before mainnet.
+1. Build the Anchor program for SBF and run it on a local validator; the
+   `Prepare` context's `sender_state.nonce + 1` seed is the one constraint
+   worth seeing execute.
+2. Verify the transport constants and pin them.
+3. One message end to end on devnet -> Base Sepolia over one adapter.
+4. Wire `transports/layerzero.rs` to the official SDK; add a `quote`
+   instruction.
+5. Key transport config by (transport, destination) before a second chain.
+6. Audit before mainnet.

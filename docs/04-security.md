@@ -139,6 +139,31 @@ checks the Solidity offsets and shifts against the exact bytes the Rust encoder
 produces. Any layout change is a `version` bump, and the gateway rejects unknown
 versions outright rather than attempting a best-effort parse.
 
+## T11. Privilege confusion via DIRECT mode
+
+A DIRECT-mode call runs with the gateway as `msg.sender`. Anything the gateway
+is privileged to do, any Solana sender can do through it. The defence is to
+keep that set empty -- the gateway holds no approvals and no roles -- and to
+refuse as targets the gateway itself, its adapters, its account implementation
+and every deployed `SolanaAccount` (whose `execute` trusts exactly the gateway
+as caller; a DIRECT call into someone else's account would drain it). The
+gateway tracks deployed accounts in `isAccount` for this reason, and the test
+suite includes the drain attempt.
+
+## T12. Relayer gas-price inflation
+
+Only relevant once on-chain gas reimbursement exists (not in phase one). A
+relayer submitting at an inflated gas price drains the sender's ledger unless
+reimbursement is capped per message.
+
+## T13. Cross-destination replay
+
+With more than one destination chain, an envelope meant for one could be
+delivered -- valid attestation and all -- to a gateway on another that trusts
+the same Solana program. `dstChainId` in the envelope, checked by every gateway
+against its own immutable id, closes this. It is cheap insurance with one
+destination and mandatory with two.
+
 ---
 
 ## Pre-deployment checklist
@@ -156,5 +181,13 @@ versions outright rather than attempting a best-effort parse.
 - [ ] Pause runbook rehearsed on both chains (they pause independently, and
       pausing Solana does not stop messages already in flight).
 - [ ] Golden-vector tests green on both sides.
+- [ ] Gateway, adapters and every deployed account refused as DIRECT targets;
+      the gateway holds no approvals or roles anywhere.
+- [ ] Every row of the failure taxonomy has a test proving the gateway's
+      response (`evm/test/gateway.test.js`).
+- [ ] Quorum verified with one prepared envelope dispatched over both
+      transports -- not two separate sends.
+- [ ] Single-key admin replaced by a multisig behind a timelock, plus a
+      separate pause-only key, before any mainnet funds.
 - [ ] External audit covering the gateway, the account clone factory, and both
       adapters.

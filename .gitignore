@@ -6,6 +6,7 @@ test-ledger/
 
 # Node / Foundry
 node_modules/
+evm/test/out/
 out/
 cache/
 broadcast/
