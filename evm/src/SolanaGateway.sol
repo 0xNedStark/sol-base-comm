@@ -33,6 +33,11 @@ contract SolanaGateway is ISolanaGateway, Auth {
     /// @dev Headroom left for bookkeeping after the inner call returns.
     uint256 private constant GAS_RESERVE = 40_000;
 
+    /// @dev Cost of the extra frame in ACCOUNT mode: the gateway -> account
+    ///      call itself, its calldata copy, the onlyGateway check, and
+    ///      returning the target's return data. Generous on purpose.
+    uint256 private constant ACCOUNT_FRAME_OVERHEAD = 40_000;
+
     /// @notice Implementation cloned for each ACCOUNT-mode sender.
     address public accountImplementation;
 
@@ -144,12 +149,6 @@ contract SolanaGateway is ISolanaGateway, Auth {
     }
 
     function _run(bytes32 id, EnvelopeLib.Envelope memory e, uint64 gasLimit) internal {
-        // A relayer must not be able to submit a delivery with just barely too
-        // little gas, have the inner call run out inside its 63/64 allowance,
-        // and burn the message as failed for the price of one cheap tx.
-        uint256 needed = (uint256(gasLimit) * 64) / 63 + GAS_RESERVE;
-        if (gasleft() < needed) revert InsufficientGas(gasleft(), needed);
-
         uint256 value = e.value;
         if (value != 0) {
             if (_balance[e.sender] < value) {
@@ -165,6 +164,21 @@ contract SolanaGateway is ISolanaGateway, Auth {
         // a failure we have already observed.
         _status[id] = Status.Executed;
 
+        // Resolve -- and on a sender's first message, deploy -- the account
+        // BEFORE measuring gas. A deployment that ran after the floor check
+        // would eat into the budget the check just certified, and first-use
+        // messages would reach the target with less than `gasLimit`.
+        address account;
+        if (e.mode == EnvelopeLib.MODE_ACCOUNT) account = _ensureAccount(e.sender);
+
+        // The floor sits immediately before the call, after every piece of
+        // gateway bookkeeping, so nothing between here and the CALL can erode
+        // it. A relayer must not be able to submit a delivery with just barely
+        // too little gas, have the inner call run out inside its 63/64
+        // allowance, and burn the message as failed for the price of one tx.
+        uint256 needed = _gasFloor(gasLimit, e.mode);
+        if (gasleft() < needed) revert InsufficientGas(gasleft(), needed);
+
         _setTransient(e.sender, e.nonce);
 
         bool ok;
@@ -172,8 +186,7 @@ contract SolanaGateway is ISolanaGateway, Auth {
         if (e.mode == EnvelopeLib.MODE_DIRECT) {
             (ok, ret) = e.target.call{value: value, gas: gasLimit}(e.callData);
         } else {
-            ISolanaAccount account = ISolanaAccount(_ensureAccount(e.sender));
-            (ok, ret) = account.execute{value: value}(e.target, value, e.callData, gasLimit);
+            (ok, ret) = ISolanaAccount(account).execute{value: value}(e.target, value, e.callData, gasLimit);
         }
 
         _setTransient(bytes32(0), 0);
@@ -185,6 +198,19 @@ contract SolanaGateway is ISolanaGateway, Auth {
             if (value != 0) _balance[e.sender] += value; // refund for the retry
             emit CallFailed(id, e.target, ret);
         }
+    }
+
+    /// @dev Gas the gateway must hold so the target receives at least
+    ///      `gasLimit`. Each CALL forwards at most 63/64 of what remains, so
+    ///      every frame between here and the target needs its own 64/63
+    ///      inflation plus its own overhead. DIRECT has one frame; ACCOUNT has
+    ///      two (gateway -> account -> target).
+    function _gasFloor(uint64 gasLimit, uint8 mode) internal pure returns (uint256 needed) {
+        needed = (uint256(gasLimit) * 64) / 63;
+        if (mode == EnvelopeLib.MODE_ACCOUNT) {
+            needed = ((needed + ACCOUNT_FRAME_OVERHEAD) * 64) / 63;
+        }
+        needed += GAS_RESERVE;
     }
 
     // ----------------------------------------------------------- xdomain view

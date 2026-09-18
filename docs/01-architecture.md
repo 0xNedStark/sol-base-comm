@@ -42,6 +42,14 @@ transport.**
    Solana programs that CPI in with `invoke_signed`, so the identity that lands
    on Base is a PDA the calling program controls.
 
+   The program splits *prepare* from *dispatch*: `prepare` builds the envelope
+   once, assigns the nonce and stores the bytes in a PDA; `dispatch_via_*`
+   forwards those bytes over one transport; `finalize` reclaims the rent. This
+   is not ceremony -- it is the only way two transports can carry byte-identical
+   envelopes, which the dual-transport quorum in D-transport depends on. A
+   design with one send instruction per transport gives the same call two
+   nonces, two hashes, and a quorum that is never met.
+
 2. **Transport layer.** A pluggable GMP. Solana-side transport module plus a
    Base-side adapter contract. Each side only ever trusts a *registered peer* on
    the other side.

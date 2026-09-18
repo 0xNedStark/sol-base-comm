@@ -39,7 +39,8 @@ base contract exists rather than leaving it to each integrator.
 From Solana, a program CPIs in with its own PDA as the authority:
 
 ```rust
-base_caller::cpi::send_via_wormhole(
+// 1. Build the envelope once; pick which transports will carry it.
+base_caller::cpi::prepare(
     CpiContext::new_with_signer(program, accounts, &[&[b"treasurer", &[bump]]]),
     SendParams {
         target: TREASURY_ADDR,
@@ -48,12 +49,21 @@ base_caller::cpi::send_via_wormhole(
         expiry: now + 3600,
         mode: MODE_DIRECT,
         calldata: abi_encode_pay(token, to, amount),
-        wormhole_nonce: 0,
     },
+    MASK_WORMHOLE | MASK_LAYERZERO,
 )?;
+
+// 2. Dispatch the same bytes over each transport (permissionless; any payer).
+base_caller::cpi::dispatch_via_wormhole(ctx_wh, nonce, 0)?;
+base_caller::cpi::dispatch_via_layerzero(ctx_lz, nonce, native_fee)?;
+
+// 3. Reclaim rent once every expected transport has carried it.
+base_caller::cpi::finalize(ctx_fin, nonce)?;
 ```
 
-The identity that arrives on Base is a PDA no human holds.
+The identity that arrives on Base is a PDA no human holds. Because both
+transports carry byte-identical envelopes, the gateway derives one message id
+for both, which is what makes `requiredConfirmations = 2` reachable.
 
 ## Docs
 
@@ -80,9 +90,9 @@ evm/test/
   envelope-parity.js        Solidity offsets vs. the Rust encoder's actual bytes
 
 solana/programs/base-caller/src/
-  lib.rs                    instructions, accounts, validation
+  lib.rs                    prepare / dispatch_via_* / finalize, accounts, validation
   envelope.rs               canonical encoder (unit-tested, golden vector)
-  state.rs                  Config, SenderState, TransportConfig
+  state.rs                  Config, SenderState, TransportConfig, PreparedMessage
   transports/               wormhole.rs (skeleton), layerzero.rs (stub)
 ```
 

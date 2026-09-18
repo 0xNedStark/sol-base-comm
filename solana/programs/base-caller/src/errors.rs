@@ -25,3 +25,19 @@ pub enum BaseCallerError {
     #[msg("Envelope encoding failed")]
     EncodeFailed,
 }
+
+#[error_code]
+pub enum PrepareError {
+    #[msg("At least one transport must be selected")]
+    NoTransports,
+    #[msg("Unknown transport bit in mask")]
+    UnknownTransport,
+    #[msg("This transport was not selected at prepare time")]
+    TransportNotExpected,
+    #[msg("This transport has already carried the message")]
+    AlreadyDispatched,
+    #[msg("Not every expected transport has dispatched yet")]
+    NotFullyDispatched,
+    #[msg("Prepared message has expired; finalize to reclaim rent")]
+    PreparedExpired,
+}

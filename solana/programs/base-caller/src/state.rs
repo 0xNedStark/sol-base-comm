@@ -55,3 +55,36 @@ impl TransportConfig {
     pub const SEED: &'static [u8] = b"transport";
     pub const LEN: usize = 8 + 1 + 1 + 32 + 32 + 4 + 1;
 }
+
+/// An envelope built once and awaiting dispatch over one or more transports.
+///
+/// This is what makes dual-transport quorum reachable. If each transport's
+/// send instruction built its own envelope, the same logical call would get
+/// two nonces, two hashes and two message ids on the destination -- and a
+/// quorum keyed on message id would never be met. So the envelope is built
+/// exactly once here, and every dispatch forwards these bytes unmodified.
+#[account]
+pub struct PreparedMessage {
+    pub authority: Pubkey,
+    /// Paid the rent; receives it back on `finalize`.
+    pub payer: Pubkey,
+    pub nonce: u64,
+    /// Mirrors the envelope so dispatch can refuse an expired message
+    /// without re-parsing the bytes.
+    pub expiry: u64,
+    /// Bitmask of transports expected to carry this envelope.
+    pub expected: u8,
+    /// Bitmask of transports that have carried it so far.
+    pub dispatched: u8,
+    pub bump: u8,
+    /// The canonical bytes. Never modified after `prepare`.
+    pub envelope: Vec<u8>,
+}
+
+impl PreparedMessage {
+    pub const SEED: &'static [u8] = b"msg";
+
+    pub fn space(envelope_len: usize) -> usize {
+        8 + 32 + 32 + 8 + 8 + 1 + 1 + 1 + 4 + envelope_len
+    }
+}

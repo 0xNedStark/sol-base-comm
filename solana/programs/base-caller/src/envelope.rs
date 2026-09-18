@@ -96,15 +96,24 @@ mod tests {
         assert_eq!(b.len(), HEADER_SIZE + p.calldata.len());
         assert_eq!(b[0], VERSION);
         assert_eq!(b[1], MSG_TYPE_CALL);
-        assert_eq!(u16::from_be_bytes(b[2..4].try_into().unwrap()), SRC_CHAIN_SOLANA);
+        assert_eq!(
+            u16::from_be_bytes(b[2..4].try_into().unwrap()),
+            SRC_CHAIN_SOLANA
+        );
         assert_eq!(&b[4..36], &sender[..]);
         assert_eq!(u64::from_be_bytes(b[36..44].try_into().unwrap()), nonce);
         assert_eq!(&b[44..64], &p.target[..]);
         assert_eq!(u128::from_be_bytes(b[64..80].try_into().unwrap()), p.value);
-        assert_eq!(u64::from_be_bytes(b[80..88].try_into().unwrap()), p.gas_limit);
+        assert_eq!(
+            u64::from_be_bytes(b[80..88].try_into().unwrap()),
+            p.gas_limit
+        );
         assert_eq!(u64::from_be_bytes(b[88..96].try_into().unwrap()), p.expiry);
         assert_eq!(b[96], p.mode);
-        assert_eq!(u32::from_be_bytes(b[97..101].try_into().unwrap()) as usize, p.calldata.len());
+        assert_eq!(
+            u32::from_be_bytes(b[97..101].try_into().unwrap()) as usize,
+            p.calldata.len()
+        );
         assert_eq!(&b[101..], &p.calldata[..]);
     }
 
@@ -123,12 +132,12 @@ mod tests {
                 "1111111111111111111111111111111111111111111111111111111111111111", // sender
                 "0000000000000007",                                                 // nonce
                 "abababababababababababababababababababab",                         // target
-                "00000000000000000de0b6b3a7640000",                                 // value (u128 BE)
-                "00000000000493e0",                                                 // gasLimit
-                "000000006553f100",                                                 // expiry
-                "00",                                                               // mode
-                "00000005",                                                         // calldataLen
-                "deadbeef01"                                                        // calldata
+                "00000000000000000de0b6b3a7640000", // value (u128 BE)
+                "00000000000493e0",                 // gasLimit
+                "000000006553f100",                 // expiry
+                "00",                               // mode
+                "00000005",                         // calldataLen
+                "deadbeef01"                        // calldata
             )
         );
     }

@@ -7,6 +7,17 @@
 //! that only the calling program's logic can produce -- which is the whole point
 //! of doing this on-chain rather than with an off-chain signer.
 //!
+//! The instruction set is split three ways, and the split is load-bearing:
+//!
+//!   prepare          build the envelope ONCE, assign the nonce, store the bytes
+//!   dispatch_via_*   forward those exact bytes over one transport
+//!   finalize         reclaim rent once every expected transport has carried it
+//!
+//! A design with one send instruction per transport would give the same logical
+//! call two nonces on two transports -- two hashes, two message ids -- and the
+//! destination's dual-transport quorum would never be met. Building once and
+//! dispatching many is what makes byte-identical envelopes possible.
+//!
 //! Architecture: docs/01-architecture.md
 //! Wire format:  docs/02-message-format.md
 
@@ -17,9 +28,12 @@ pub mod errors;
 pub mod state;
 pub mod transports;
 
-use envelope::{CallParams, MODE_ACCOUNT, MAX_CALLDATA};
-use errors::BaseCallerError;
-use state::{Config, SenderState, TransportConfig};
+use envelope::{CallParams, HEADER_SIZE, MAX_CALLDATA, MODE_ACCOUNT};
+use errors::{BaseCallerError, PrepareError};
+use state::{Config, PreparedMessage, SenderState, TransportConfig};
+use transports::{
+    MASK_ALL, MASK_LAYERZERO, MASK_WORMHOLE, TRANSPORT_LAYERZERO, TRANSPORT_WORMHOLE,
+};
 
 declare_id!("BaseCa11er11111111111111111111111111111111");
 
@@ -51,7 +65,10 @@ pub mod base_caller {
         peer: [u8; 32],
         dest_chain: u32,
     ) -> Result<()> {
-        require!(ctx.accounts.config.admin == ctx.accounts.admin.key(), BaseCallerError::NotAdmin);
+        require!(
+            ctx.accounts.config.admin == ctx.accounts.admin.key(),
+            BaseCallerError::NotAdmin
+        );
         let t = &mut ctx.accounts.transport;
         t.transport_id = transport_id;
         t.enabled = enabled;
@@ -59,135 +76,238 @@ pub mod base_caller {
         t.peer = peer;
         t.dest_chain = dest_chain;
         t.bump = ctx.bumps.transport;
-        emit!(TransportUpdated { transport_id, enabled, peer, dest_chain });
+        emit!(TransportUpdated {
+            transport_id,
+            enabled,
+            peer,
+            dest_chain
+        });
         Ok(())
     }
 
     pub fn set_paused(ctx: Context<AdminOnly>, paused: bool) -> Result<()> {
-        require!(ctx.accounts.config.admin == ctx.accounts.admin.key(), BaseCallerError::NotAdmin);
+        require!(
+            ctx.accounts.config.admin == ctx.accounts.admin.key(),
+            BaseCallerError::NotAdmin
+        );
         ctx.accounts.config.paused = paused;
         Ok(())
     }
 
     pub fn transfer_admin(ctx: Context<AdminOnly>, new_admin: Pubkey) -> Result<()> {
-        require!(ctx.accounts.config.admin == ctx.accounts.admin.key(), BaseCallerError::NotAdmin);
+        require!(
+            ctx.accounts.config.admin == ctx.accounts.admin.key(),
+            BaseCallerError::NotAdmin
+        );
         ctx.accounts.config.pending_admin = new_admin;
         Ok(())
     }
 
     pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
         let config = &mut ctx.accounts.config;
-        require!(config.pending_admin == ctx.accounts.new_admin.key(), BaseCallerError::NotPendingAdmin);
+        require!(
+            config.pending_admin == ctx.accounts.new_admin.key(),
+            BaseCallerError::NotPendingAdmin
+        );
         config.admin = config.pending_admin;
         config.pending_admin = Pubkey::default();
         Ok(())
     }
 
-    /// Send a call to Base over Wormhole.
+    // ------------------------------------------------------------- prepare
+
+    /// Build the envelope once and store it for dispatch.
     ///
-    /// There is a separate instruction per transport rather than one dispatching
-    /// on a `transport_id` argument, because Anchor account contexts are static:
-    /// the Wormhole core bridge and the LayerZero endpoint need different
-    /// accounts, and a single context would have to accept the union of both as
-    /// optional and validate them by hand. Separate instructions keep the
-    /// account constraints declarative and checkable. The envelope-building
-    /// logic is shared, so the two paths cannot drift.
-    pub fn send_via_wormhole(ctx: Context<SendViaWormhole>, params: SendParams) -> Result<()> {
-        let envelope = build_envelope(
-            &ctx.accounts.config,
-            &ctx.accounts.transport,
-            &mut ctx.accounts.sender_state,
-            ctx.accounts.authority.key(),
-            &params,
-        )?;
+    /// `transports` is a bitmask of `MASK_*` naming every transport that will
+    /// carry this envelope. Choosing them here, rather than at dispatch, makes
+    /// a partially dispatched message visible on-chain instead of mysterious.
+    ///
+    /// The nonce is incremented here, and only here. If this instruction fails
+    /// the whole transaction reverts and the increment is rolled back, so
+    /// nonces stay gapless -- which matters for any Base-side contract doing
+    /// the `lastNonce` ordering check from the Treasury example.
+    pub fn prepare(ctx: Context<Prepare>, params: SendParams, transports: u8) -> Result<()> {
+        let config = &ctx.accounts.config;
+        require!(!config.paused, BaseCallerError::Paused);
 
-        transports::wormhole::post_message(
-            &ctx.accounts.transport,
-            &envelope,
-            &ctx.accounts.to_wormhole_accounts(ctx.bumps.wormhole_emitter),
-            params.wormhole_nonce,
-        )?;
+        require!(transports != 0, PrepareError::NoTransports);
+        require!(transports & !MASK_ALL == 0, PrepareError::UnknownTransport);
 
-        emit!(CallDispatched {
-            transport_id: transports::TRANSPORT_WORMHOLE,
-            sender: ctx.accounts.authority.key(),
-            nonce: ctx.accounts.sender_state.nonce,
+        require!(
+            params.calldata.len() <= MAX_CALLDATA,
+            BaseCallerError::CalldataTooLarge
+        );
+        require!(params.mode <= MODE_ACCOUNT, BaseCallerError::InvalidMode);
+        require!(params.target != [0u8; 20], BaseCallerError::InvalidTarget);
+        require!(
+            params.gas_limit >= MIN_GAS_LIMIT,
+            BaseCallerError::GasLimitTooLow
+        );
+
+        if params.expiry != 0 {
+            let now = Clock::get()?.unix_timestamp as u64;
+            require!(params.expiry > now, BaseCallerError::ExpiryInPast);
+        }
+
+        let authority = ctx.accounts.authority.key();
+        let sender_state = &mut ctx.accounts.sender_state;
+        sender_state.authority = authority;
+        sender_state.nonce = sender_state
+            .nonce
+            .checked_add(1)
+            .ok_or(BaseCallerError::NonceOverflow)?;
+        let nonce = sender_state.nonce;
+
+        let bytes = envelope::encode(
+            &authority.to_bytes(),
+            nonce,
+            &CallParams {
+                target: params.target,
+                value: params.value,
+                gas_limit: params.gas_limit,
+                expiry: params.expiry,
+                mode: params.mode,
+                calldata: params.calldata.clone(),
+            },
+        )
+        .map_err(|_| error!(BaseCallerError::EncodeFailed))?;
+
+        let msg = &mut ctx.accounts.message;
+        msg.authority = authority;
+        msg.payer = ctx.accounts.payer.key();
+        msg.nonce = nonce;
+        msg.expiry = params.expiry;
+        msg.expected = transports;
+        msg.dispatched = 0;
+        msg.bump = ctx.bumps.message;
+        msg.envelope = bytes;
+
+        emit!(MessagePrepared {
+            sender: authority,
+            nonce,
             target: params.target,
-            envelope_len: envelope.len() as u32,
+            transports,
+            envelope_len: msg.envelope.len() as u32,
         });
         Ok(())
     }
 
-    /// Send a call to Base over LayerZero v2.
-    pub fn send_via_layerzero(ctx: Context<SendViaLayerZero>, params: SendParams, native_fee: u64) -> Result<()> {
-        let envelope = build_envelope(
-            &ctx.accounts.config,
-            &ctx.accounts.transport,
-            &mut ctx.accounts.sender_state,
-            ctx.accounts.authority.key(),
-            &params,
-        )?;
+    // ------------------------------------------------------------ dispatch
 
-        transports::layerzero::send(
+    /// Forward a prepared envelope over Wormhole. Permissionless: the bytes are
+    /// fixed, so it does not matter who pays to relay them.
+    ///
+    /// There is one dispatch instruction per transport rather than one that
+    /// switches on a transport id, because Anchor account contexts are static:
+    /// the Wormhole core bridge and the LayerZero endpoint need different
+    /// accounts, and a single context would have to accept the union of both
+    /// as optional and validate them by hand.
+    pub fn dispatch_via_wormhole(
+        ctx: Context<DispatchViaWormhole>,
+        nonce: u64,
+        batch_nonce: u32,
+    ) -> Result<()> {
+        require!(!ctx.accounts.config.paused, BaseCallerError::Paused);
+        require!(
+            ctx.accounts.transport.enabled,
+            BaseCallerError::TransportDisabled
+        );
+
+        let msg = &mut ctx.accounts.message;
+        mark_dispatch(msg, MASK_WORMHOLE)?;
+
+        transports::wormhole::post_message(
             &ctx.accounts.transport,
-            &envelope,
-            &ctx.accounts.to_layerzero_accounts(ctx.bumps.oapp),
-            native_fee,
-            params.gas_limit,
+            &msg.envelope,
+            &ctx.accounts
+                .to_wormhole_accounts(ctx.bumps.wormhole_emitter),
+            batch_nonce,
         )?;
 
         emit!(CallDispatched {
-            transport_id: transports::TRANSPORT_LAYERZERO,
-            sender: ctx.accounts.authority.key(),
-            nonce: ctx.accounts.sender_state.nonce,
-            target: params.target,
-            envelope_len: envelope.len() as u32,
+            transport_id: TRANSPORT_WORMHOLE,
+            sender: msg.authority,
+            nonce,
+            dispatched: msg.dispatched,
+            expected: msg.expected,
+        });
+        Ok(())
+    }
+
+    /// Forward a prepared envelope over LayerZero v2. Permissionless.
+    pub fn dispatch_via_layerzero(
+        ctx: Context<DispatchViaLayerZero>,
+        nonce: u64,
+        native_fee: u64,
+    ) -> Result<()> {
+        require!(!ctx.accounts.config.paused, BaseCallerError::Paused);
+        require!(
+            ctx.accounts.transport.enabled,
+            BaseCallerError::TransportDisabled
+        );
+
+        let msg = &mut ctx.accounts.message;
+        mark_dispatch(msg, MASK_LAYERZERO)?;
+
+        // gas_limit lives in the envelope; read it back rather than trusting a
+        // caller-supplied duplicate that could disagree with the bytes.
+        let gas_limit = u64::from_be_bytes(msg.envelope[80..88].try_into().unwrap());
+
+        transports::layerzero::send(
+            &ctx.accounts.transport,
+            &msg.envelope,
+            &ctx.accounts.to_layerzero_accounts(ctx.bumps.oapp),
+            native_fee,
+            gas_limit,
+        )?;
+
+        emit!(CallDispatched {
+            transport_id: TRANSPORT_LAYERZERO,
+            sender: msg.authority,
+            nonce,
+            dispatched: msg.dispatched,
+            expected: msg.expected,
+        });
+        Ok(())
+    }
+
+    // ------------------------------------------------------------ finalize
+
+    /// Close the prepared message and return rent to the original payer.
+    ///
+    /// Allowed once every expected transport has dispatched, or once the
+    /// message has expired (a stuck partial dispatch should not lock rent
+    /// forever -- the destination will reject the expired envelope anyway).
+    pub fn finalize(ctx: Context<Finalize>, nonce: u64) -> Result<()> {
+        let msg = &ctx.accounts.message;
+        let fully_dispatched = msg.dispatched == msg.expected;
+        let expired = msg.expiry != 0 && (Clock::get()?.unix_timestamp as u64) > msg.expiry;
+        require!(
+            fully_dispatched || expired,
+            PrepareError::NotFullyDispatched
+        );
+
+        emit!(MessageFinalized {
+            sender: msg.authority,
+            nonce,
+            dispatched: msg.dispatched,
+            expected: msg.expected
         });
         Ok(())
     }
 }
 
-/// Shared envelope construction. Validates, bumps the nonce, encodes.
-///
-/// The nonce is incremented before the transport CPI. If the CPI fails the whole
-/// transaction reverts and the increment is rolled back with it, so nonces stay
-/// gapless -- which matters for any Base-side contract doing the `lastNonce`
-/// ordering check from the Treasury example.
-fn build_envelope(
-    config: &Account<Config>,
-    transport: &Account<TransportConfig>,
-    sender_state: &mut Account<SenderState>,
-    authority: Pubkey,
-    params: &SendParams,
-) -> Result<Vec<u8>> {
-    require!(!config.paused, BaseCallerError::Paused);
-    require!(transport.enabled, BaseCallerError::TransportDisabled);
-    require!(params.calldata.len() <= MAX_CALLDATA, BaseCallerError::CalldataTooLarge);
-    require!(params.mode <= MODE_ACCOUNT, BaseCallerError::InvalidMode);
-    require!(params.target != [0u8; 20], BaseCallerError::InvalidTarget);
-    require!(params.gas_limit >= MIN_GAS_LIMIT, BaseCallerError::GasLimitTooLow);
-
-    if params.expiry != 0 {
+/// Shared dispatch bookkeeping. Refuses an unexpected or repeated transport
+/// and an expired message, then records the bit.
+fn mark_dispatch(msg: &mut Account<PreparedMessage>, mask: u8) -> Result<()> {
+    require!(msg.expected & mask != 0, PrepareError::TransportNotExpected);
+    require!(msg.dispatched & mask == 0, PrepareError::AlreadyDispatched);
+    if msg.expiry != 0 {
         let now = Clock::get()?.unix_timestamp as u64;
-        require!(params.expiry > now, BaseCallerError::ExpiryInPast);
+        require!(now <= msg.expiry, PrepareError::PreparedExpired);
     }
-
-    sender_state.authority = authority;
-    sender_state.nonce = sender_state.nonce.checked_add(1).ok_or(BaseCallerError::NonceOverflow)?;
-
-    envelope::encode(
-        &authority.to_bytes(),
-        sender_state.nonce,
-        &CallParams {
-            target: params.target,
-            value: params.value,
-            gas_limit: params.gas_limit,
-            expiry: params.expiry,
-            mode: params.mode,
-            calldata: params.calldata.clone(),
-        },
-    )
-    .map_err(|_| error!(BaseCallerError::EncodeFailed))
+    msg.dispatched |= mask;
+    Ok(())
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -204,8 +324,15 @@ pub struct SendParams {
     pub mode: u8,
     /// ABI-encoded call, selector first.
     pub calldata: Vec<u8>,
-    /// Wormhole batch nonce. Ignored by other transports.
-    pub wormhole_nonce: u32,
+}
+
+#[event]
+pub struct MessagePrepared {
+    pub sender: Pubkey,
+    pub nonce: u64,
+    pub target: [u8; 20],
+    pub transports: u8,
+    pub envelope_len: u32,
 }
 
 #[event]
@@ -213,8 +340,16 @@ pub struct CallDispatched {
     pub transport_id: u8,
     pub sender: Pubkey,
     pub nonce: u64,
-    pub target: [u8; 20],
-    pub envelope_len: u32,
+    pub dispatched: u8,
+    pub expected: u8,
+}
+
+#[event]
+pub struct MessageFinalized {
+    pub sender: Pubkey,
+    pub nonce: u64,
+    pub dispatched: u8,
+    pub expected: u8,
 }
 
 #[event]
@@ -271,15 +406,14 @@ pub struct AcceptAdmin<'info> {
 /// `authority` is whatever identity should appear on Base. A user wallet signs
 /// directly; a calling program passes its own PDA and signs with
 /// `invoke_signed`, which is the intended usage.
+///
+/// The message PDA is keyed by (authority, next nonce). The nonce is read from
+/// `sender_state` before the increment, so the seed is `nonce + 1`.
 #[derive(Accounts)]
-pub struct SendViaWormhole<'info> {
+#[instruction(params: SendParams)]
+pub struct Prepare<'info> {
     #[account(seeds = [Config::SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
-    #[account(
-        seeds = [TransportConfig::SEED, &[transports::TRANSPORT_WORMHOLE]],
-        bump = transport.bump
-    )]
-    pub transport: Account<'info, TransportConfig>,
     #[account(
         init_if_needed,
         payer = payer,
@@ -288,8 +422,47 @@ pub struct SendViaWormhole<'info> {
         bump
     )]
     pub sender_state: Account<'info, SenderState>,
+    #[account(
+        init,
+        payer = payer,
+        space = PreparedMessage::space(HEADER_SIZE + params.calldata.len()),
+        seeds = [
+            PreparedMessage::SEED,
+            authority.key().as_ref(),
+            &(sender_state.nonce + 1).to_le_bytes()
+        ],
+        bump
+    )]
+    pub message: Account<'info, PreparedMessage>,
 
     pub authority: Signer<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct DispatchViaWormhole<'info> {
+    #[account(seeds = [Config::SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        seeds = [TransportConfig::SEED, &[TRANSPORT_WORMHOLE]],
+        bump = transport.bump
+    )]
+    pub transport: Account<'info, TransportConfig>,
+    #[account(
+        mut,
+        seeds = [PreparedMessage::SEED, authority.key().as_ref(), &nonce.to_le_bytes()],
+        bump = message.bump,
+        has_one = authority
+    )]
+    pub message: Account<'info, PreparedMessage>,
+    /// CHECK: only used to derive the message PDA; `has_one` pins it.
+    pub authority: UncheckedAccount<'info>,
+
+    /// Pays the transport fee. Need not be the authority -- dispatch is
+    /// permissionless because the bytes are already fixed.
     #[account(mut)]
     pub payer: Signer<'info>,
 
@@ -321,24 +494,25 @@ pub struct SendViaWormhole<'info> {
 }
 
 #[derive(Accounts)]
-pub struct SendViaLayerZero<'info> {
+#[instruction(nonce: u64)]
+pub struct DispatchViaLayerZero<'info> {
     #[account(seeds = [Config::SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
     #[account(
-        seeds = [TransportConfig::SEED, &[transports::TRANSPORT_LAYERZERO]],
+        seeds = [TransportConfig::SEED, &[TRANSPORT_LAYERZERO]],
         bump = transport.bump
     )]
     pub transport: Account<'info, TransportConfig>,
     #[account(
-        init_if_needed,
-        payer = payer,
-        space = SenderState::LEN,
-        seeds = [SenderState::SEED, authority.key().as_ref()],
-        bump
+        mut,
+        seeds = [PreparedMessage::SEED, authority.key().as_ref(), &nonce.to_le_bytes()],
+        bump = message.bump,
+        has_one = authority
     )]
-    pub sender_state: Account<'info, SenderState>,
+    pub message: Account<'info, PreparedMessage>,
+    /// CHECK: only used to derive the message PDA; `has_one` pins it.
+    pub authority: UncheckedAccount<'info>,
 
-    pub authority: Signer<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
 
@@ -354,10 +528,32 @@ pub struct SendViaLayerZero<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+#[instruction(nonce: u64)]
+pub struct Finalize<'info> {
+    #[account(
+        mut,
+        close = payer,
+        seeds = [PreparedMessage::SEED, authority.key().as_ref(), &nonce.to_le_bytes()],
+        bump = message.bump,
+        has_one = authority,
+        has_one = payer
+    )]
+    pub message: Account<'info, PreparedMessage>,
+    /// CHECK: only used to derive the message PDA; `has_one` pins it.
+    pub authority: UncheckedAccount<'info>,
+    /// CHECK: receives the rent back; `has_one` pins it to the original payer.
+    #[account(mut)]
+    pub payer: UncheckedAccount<'info>,
+}
+
 // ------------------------------------------------- context -> transport views
 
-impl<'info> SendViaWormhole<'info> {
-    fn to_wormhole_accounts(&self, emitter_bump: u8) -> transports::wormhole::WormholeAccounts<'info> {
+impl<'info> DispatchViaWormhole<'info> {
+    fn to_wormhole_accounts(
+        &self,
+        emitter_bump: u8,
+    ) -> transports::wormhole::WormholeAccounts<'info> {
         transports::wormhole::WormholeAccounts {
             bridge: self.wormhole_bridge.to_account_info(),
             message: self.wormhole_message.to_account_info(),
@@ -374,8 +570,11 @@ impl<'info> SendViaWormhole<'info> {
     }
 }
 
-impl<'info> SendViaLayerZero<'info> {
-    fn to_layerzero_accounts(&self, oapp_bump: u8) -> transports::layerzero::LayerZeroAccounts<'info> {
+impl<'info> DispatchViaLayerZero<'info> {
+    fn to_layerzero_accounts(
+        &self,
+        oapp_bump: u8,
+    ) -> transports::layerzero::LayerZeroAccounts<'info> {
         transports::layerzero::LayerZeroAccounts {
             endpoint_program: self.endpoint_program.to_account_info(),
             oapp: self.oapp.to_account_info(),
