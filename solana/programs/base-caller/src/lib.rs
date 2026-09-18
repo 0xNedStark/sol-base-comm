@@ -29,7 +29,7 @@ pub mod state;
 pub mod transports;
 
 use envelope::{CallParams, HEADER_SIZE, MAX_CALLDATA, MODE_ACCOUNT};
-use errors::{BaseCallerError, PrepareError};
+use errors::BaseCallerError;
 use state::{Config, PreparedMessage, SenderState, TransportConfig};
 use transports::{
     MASK_ALL, MASK_LAYERZERO, MASK_WORMHOLE, TRANSPORT_LAYERZERO, TRANSPORT_WORMHOLE,
@@ -132,8 +132,8 @@ pub mod base_caller {
         let config = &ctx.accounts.config;
         require!(!config.paused, BaseCallerError::Paused);
 
-        require!(transports != 0, PrepareError::NoTransports);
-        require!(transports & !MASK_ALL == 0, PrepareError::UnknownTransport);
+        require!(transports != 0, BaseCallerError::NoTransports);
+        require!(transports & !MASK_ALL == 0, BaseCallerError::UnknownTransport);
 
         require!(
             params.calldata.len() <= MAX_CALLDATA,
@@ -306,7 +306,7 @@ pub mod base_caller {
         let expired = msg.expiry != 0 && (Clock::get()?.unix_timestamp as u64) > msg.expiry;
         require!(
             fully_dispatched || expired,
-            PrepareError::NotFullyDispatched
+            BaseCallerError::NotFullyDispatched
         );
 
         emit!(MessageFinalized {
@@ -322,11 +322,11 @@ pub mod base_caller {
 /// Shared dispatch bookkeeping. Refuses an unexpected or repeated transport
 /// and an expired message, then records the bit.
 fn mark_dispatch(msg: &mut Account<PreparedMessage>, mask: u8) -> Result<()> {
-    require!(msg.expected & mask != 0, PrepareError::TransportNotExpected);
-    require!(msg.dispatched & mask == 0, PrepareError::AlreadyDispatched);
+    require!(msg.expected & mask != 0, BaseCallerError::TransportNotExpected);
+    require!(msg.dispatched & mask == 0, BaseCallerError::AlreadyDispatched);
     if msg.expiry != 0 {
         let now = Clock::get()?.unix_timestamp as u64;
-        require!(now <= msg.expiry, PrepareError::PreparedExpired);
+        require!(now <= msg.expiry, BaseCallerError::PreparedExpired);
     }
     msg.dispatched |= mask;
     Ok(())

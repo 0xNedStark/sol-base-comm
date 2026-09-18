@@ -1,0 +1,5 @@
+# The host cargo resolves the lockfile; the SBF toolchain (platform-tools
+# v1.41, rustc 1.75) builds from it. Ask the resolver to honour the programs'
+# rust-version so it does not lock crates the SBF toolchain cannot build.
+[resolver]
+incompatible-rust-versions = "fallback"

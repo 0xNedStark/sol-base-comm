@@ -1,8 +1,10 @@
 # Rust / Anchor
 target/
-Cargo.lock
 .anchor/
 test-ledger/
+# solana/Cargo.lock IS committed: it is v3 with MSRV pins so `cargo build-sbf`
+# works under platform-tools' older cargo. program-tests has its own lockfile.
+solana/program-tests/Cargo.lock
 
 # Node / Foundry
 node_modules/

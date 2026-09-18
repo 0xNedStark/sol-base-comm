@@ -1,17 +1,19 @@
 [toolchain]
+anchor_version = "0.30.1"
 
 [features]
 resolution = true
 skip-lint = false
 
 [programs.localnet]
-base_caller = "BaseCa11er11111111111111111111111111111111"
+base_caller = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+mock_transport = "4i7UQSJbAm5fjAL8Y3bhDJSjn8M17B85FTae6qw9Mt4j"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

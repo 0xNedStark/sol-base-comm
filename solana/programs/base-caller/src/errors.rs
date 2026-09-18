@@ -26,10 +26,7 @@ pub enum BaseCallerError {
     EncodeFailed,
     #[msg("Destination chain id is zero or is Solana itself")]
     InvalidDestination,
-}
-
-#[error_code]
-pub enum PrepareError {
+    // -- prepare / dispatch / finalize
     #[msg("At least one transport must be selected")]
     NoTransports,
     #[msg("Unknown transport bit in mask")]

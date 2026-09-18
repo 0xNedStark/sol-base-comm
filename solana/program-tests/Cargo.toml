@@ -1,0 +1,19 @@
+[package]
+name = "program-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deliberately its own workspace. solana-program-test drags in a modern
+# dependency tree that the SBF toolchain's bundled cargo cannot parse; keeping
+# it out of the programs' lockfile is what lets `cargo build-sbf` work.
+[workspace]
+
+[dependencies]
+anchor-lang = "0.30.1"
+base-caller = { path = "../programs/base-caller", features = ["no-entrypoint"] }
+mock-transport = { path = "../programs/mock-transport", features = ["no-entrypoint"] }
+
+[dev-dependencies]
+solana-program-test = "1.18"
+solana-sdk = "1.18"
