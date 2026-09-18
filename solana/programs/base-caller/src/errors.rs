@@ -24,6 +24,8 @@ pub enum BaseCallerError {
     NotPendingAdmin,
     #[msg("Envelope encoding failed")]
     EncodeFailed,
+    #[msg("Destination chain id is zero or is Solana itself")]
+    InvalidDestination,
 }
 
 #[error_code]

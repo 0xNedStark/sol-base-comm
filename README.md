@@ -43,6 +43,7 @@ From Solana, a program CPIs in with its own PDA as the authority:
 base_caller::cpi::prepare(
     CpiContext::new_with_signer(program, accounts, &[&[b"treasurer", &[bump]]]),
     SendParams {
+        dst_chain_id: CHAIN_BASE,
         target: TREASURY_ADDR,
         value: 0,
         gas_limit: 200_000,

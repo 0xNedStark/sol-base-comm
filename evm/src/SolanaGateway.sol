@@ -38,6 +38,11 @@ contract SolanaGateway is ISolanaGateway, Auth {
     ///      returning the target's return data. Generous on purpose.
     uint256 private constant ACCOUNT_FRAME_OVERHEAD = 40_000;
 
+    /// @notice This gateway's own internal chain id. Every envelope names its
+    ///         destination; one meant for another chain is rejected here, so a
+    ///         second deployment elsewhere cannot be fed this chain's messages.
+    uint16 public immutable chainId;
+
     /// @notice Implementation cloned for each ACCOUNT-mode sender.
     address public accountImplementation;
 
@@ -71,6 +76,7 @@ contract SolanaGateway is ISolanaGateway, Auth {
     error BadVersion(uint8 version);
     error BadMessageType(uint8 msgType);
     error BadSourceChain(uint16 srcChainId);
+    error BadDestinationChain(uint16 dstChainId, uint16 expected);
     error MessageExpired(uint64 expiry);
     error BadMode(uint8 mode);
     error NotAllowed();
@@ -82,7 +88,8 @@ contract SolanaGateway is ISolanaGateway, Auth {
     error TransferFailed();
     error Create2Mismatch();
 
-    constructor(address owner_) Auth(owner_) {
+    constructor(address owner_, uint16 chainId_) Auth(owner_) {
+        chainId = chainId_;
         accountImplementation = address(new SolanaAccount(address(this)));
     }
 
@@ -144,6 +151,7 @@ contract SolanaGateway is ISolanaGateway, Auth {
         if (e.version != EnvelopeLib.VERSION) revert BadVersion(e.version);
         if (e.msgType != EnvelopeLib.MSG_TYPE_CALL) revert BadMessageType(e.msgType);
         if (e.srcChainId != EnvelopeLib.CHAIN_ID_SOLANA) revert BadSourceChain(e.srcChainId);
+        if (e.dstChainId != chainId) revert BadDestinationChain(e.dstChainId, chainId);
         if (e.expiry != 0 && block.timestamp > e.expiry) revert MessageExpired(e.expiry);
         if (e.mode > EnvelopeLib.MODE_ACCOUNT) revert BadMode(e.mode);
     }

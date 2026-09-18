@@ -1,7 +1,7 @@
 // Simulate EnvelopeLib.decode's calldataload+shift arithmetic against the
 // byte vector the Rust encoder actually produced.
 const hex =
-  "01" + "00" + "0001" +
+  "01" + "00" + "0001" + "0003" +
   "1111111111111111111111111111111111111111111111111111111111111111" +
   "0000000000000007" +
   "abababababababababababababababababababab" +
@@ -23,29 +23,30 @@ let w = load(0);
 const version    = (w >> 248n) & M(8);
 const msgType    = (w >> 240n) & M(8);
 const srcChainId = (w >> 224n) & M(16);
+const dstChainId = (w >> 208n) & M(16);
 
-w = load(4);
+w = load(6);
 const sender = "0x" + w.toString(16).padStart(64, "0");
 
-w = load(36);
+w = load(38);
 const nonce  = (w >> 192n) & M(64);
 const target = "0x" + (((w >> 32n) & M(160))).toString(16).padStart(40, "0");
 
-w = load(64);
+w = load(66);
 const value    = (w >> 128n) & M(128);
 const gasLimit = (w >> 64n) & M(64);
 const expiry   = w & M(64);
 
-w = load(96);
+w = load(98);
 const mode        = (w >> 248n) & M(8);
 const calldataLen = (w >> 216n) & M(32);
 
-const HEADER = 101;
+const HEADER = 103;
 const callData = "0x" + buf.subarray(HEADER).toString("hex");
 
-const got = { version, msgType, srcChainId, sender, nonce, target, value, gasLimit, expiry, mode, calldataLen, callData, totalLen: buf.length };
+const got = { version, msgType, srcChainId, dstChainId, sender, nonce, target, value, gasLimit, expiry, mode, calldataLen, callData, totalLen: buf.length };
 const want = {
-  version: 1n, msgType: 0n, srcChainId: 1n,
+  version: 1n, msgType: 0n, srcChainId: 1n, dstChainId: 3n,
   sender: "0x" + "11".repeat(32),
   nonce: 7n,
   target: "0x" + "ab".repeat(20),

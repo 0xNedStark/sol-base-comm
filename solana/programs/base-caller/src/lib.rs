@@ -143,6 +143,14 @@ pub mod base_caller {
             params.gas_limit >= MIN_GAS_LIMIT,
             BaseCallerError::GasLimitTooLow
         );
+        require!(
+            params.dst_chain_id != 0 && params.dst_chain_id != envelope::SRC_CHAIN_SOLANA,
+            BaseCallerError::InvalidDestination
+        );
+        // TODO(multi-destination): TransportConfig is keyed by transport only.
+        // A second destination needs it keyed by (transport, dst_chain_id) so
+        // each destination pins its own adapter peer. Single-destination is
+        // correct as is; do this before adding a second gateway.
 
         if params.expiry != 0 {
             let now = Clock::get()?.unix_timestamp as u64;
@@ -162,6 +170,7 @@ pub mod base_caller {
             &authority.to_bytes(),
             nonce,
             &CallParams {
+                dst_chain_id: params.dst_chain_id,
                 target: params.target,
                 value: params.value,
                 gas_limit: params.gas_limit,
@@ -251,7 +260,7 @@ pub mod base_caller {
 
         // gas_limit lives in the envelope; read it back rather than trusting a
         // caller-supplied duplicate that could disagree with the bytes.
-        let gas_limit = u64::from_be_bytes(msg.envelope[80..88].try_into().unwrap());
+        let gas_limit = u64::from_be_bytes(msg.envelope[82..90].try_into().unwrap());
 
         transports::layerzero::send(
             &ctx.accounts.transport,
@@ -312,7 +321,10 @@ fn mark_dispatch(msg: &mut Account<PreparedMessage>, mask: u8) -> Result<()> {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct SendParams {
-    /// Base contract to call.
+    /// Internal id of the destination chain (see envelope::CHAIN_*). Baked into
+    /// the envelope so a gateway on any other chain rejects it.
+    pub dst_chain_id: u16,
+    /// Contract to call on the destination.
     pub target: [u8; 20],
     /// Wei of ETH to attach on Base, drawn from this sender's gateway balance.
     pub value: u128,
