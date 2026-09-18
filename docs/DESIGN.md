@@ -290,6 +290,39 @@ Wormhole in the *same* phase, not later. The adapter abstraction is unproven unt
 
 Hyperlane is the right answer later if you grow large enough that running your own validator set is cheaper and safer than renting one. CCIP is worth revisiting if institutional counterparties need a named, accountable operator.
 
+### Per-app verifier choice, and what a DVN is
+
+The recommendation above rests on one property of LayerZero: the application chooses who verifies its messages. This subsection explains that property from the ground up, because the mainnet configuration decision depends on understanding it.
+
+**Every bridge has a group of witnesses.** Some set of parties watches the source chain and attests "this message was genuinely sent." That group is the trust root — if they collude, they can forge a message, and every check downstream passes. The design's threat model (T1) says this is the one failure nothing else mitigates.
+
+**On most bridges the group is fixed by the protocol.** Wormhole has 19 guardians; every application using Wormhole trusts the same 19. You cannot choose them, add to them, or require extra signers for your own high-value messages. You inherit the protocol's security whole.
+
+**On LayerZero v2 the application chooses its own group.** The witnesses are called DVNs — Decentralized Verifier Networks — and when you deploy your adapter you configure which of them must sign before a message to your contract counts as verified.
+
+**What a DVN does, mechanically:**
+
+1. Your message is written to LayerZero's endpoint on Solana, producing a hash.
+2. The DVN watches Solana, sees the message, waits the number of block confirmations you configured, and independently confirms that a message with that hash was committed.
+3. It writes that confirmation to the destination chain.
+4. Once every DVN your app requires has written a confirmation, the message is verified and the Executor delivers it to your adapter.
+
+A DVN is a witness, nothing more. It moves no funds and executes nothing; it attests that a message exists on the source chain. Independent operators run them — infrastructure companies, security firms, sometimes the protocol team itself — each with separate infrastructure and separate keys. The name: *Verifier* because that is its only job; *Network* because each operator runs it as a distributed service; *Decentralized* because there is no fixed list and no privileged member, and each application picks its own.
+
+**What the choice looks like in practice.** For the configuration-target path, a mainnet setting might be:
+
+| Setting | Example | Effect |
+| --- | --- | --- |
+| Required DVNs | Operator A **and** Operator B | Both must sign; two unrelated companies |
+| Optional DVNs | any 1 of Operators C, D, E | One more independent confirmation |
+| Confirmations | N finalized Solana blocks | The reorg guard (T2), enforced by the witnesses |
+
+A message to your contract executes only if that exact combination signed it. Another application on the same LayerZero deployment may require one DVN, or five. Your security is yours.
+
+**Why it matters here.** It delivers the T1 mitigation — independent parties must agree — *inside one transport*, and it is a configuration change rather than a redeployment. Start on testnet with a single default DVN; add a second before mainnet without touching the gateway or any target. It also stacks with the dual-transport quorum below: LayerZero with two DVNs plus Wormhole's guardians means three disjoint groups must all agree for a high-value call.
+
+**The trade-off.** You are now responsible for choosing well. Two DVNs run by the same company, or two that depend on the same RPC provider, give less independence than they appear to. Choosing operators with genuinely separate infrastructure is a judgment call to make with current documentation in hand, since the roster of operators changes. The decision to take before mainnet is not *whether* to require two DVNs on the config path — yes — but *which two*.
+
 ### Dual-transport quorum — the one control that addresses transport compromise
 
 For high-value targets, require the same envelope through two transports before executing.
