@@ -70,6 +70,7 @@ for both, which is what makes `requiredConfirmations = 2` reachable.
 
 | | |
 |---|---|
+| [`docs/DESIGN.md`](docs/DESIGN.md) | **The generalised design doc** (Solana → any EVM chain): status, architecture, envelope, decisions, transports, threat model, interfaces, adoption path |
 | [`docs/01-architecture.md`](docs/01-architecture.md) | The design, the decisions behind it, and what it does **not** protect against |
 | [`docs/02-message-format.md`](docs/02-message-format.md) | Envelope wire format |
 | [`docs/03-transport-comparison.md`](docs/03-transport-comparison.md) | Wormhole vs LayerZero vs Hyperlane vs CCIP vs Axelar, and the recommendation |
