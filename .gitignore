@@ -1,0 +1,15 @@
+# Rust / Anchor
+target/
+Cargo.lock
+.anchor/
+test-ledger/
+
+# Node / Foundry
+node_modules/
+out/
+cache/
+broadcast/
+
+# Local
+.env
+.DS_Store
