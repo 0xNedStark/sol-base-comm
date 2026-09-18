@@ -15,7 +15,7 @@
 
 ## Where we are
 
-Phase one is implemented and verified in-process; the one remaining phase-one exit criterion — a message landing end to end on public testnets — needs a Solana build toolchain and testnet keys that the build environment did not have. All four open design questions are answered and their consequences are in the code.
+Phase one is implemented and verified on both chains in-process and on a local validator. The one remaining phase-one exit criterion is a message landing end to end on **public** testnets, which needs funded keys and RPC endpoints. All four open design questions are answered and their consequences are in the code.
 
 ### Implementation status
 
@@ -25,42 +25,44 @@ Phase one is implemented and verified in-process; the one remaining phase-one ex
 | Gateway | Done, phase-one scope | 28 behaviour tests on an in-process Cancun EVM |
 | Callable base + config-invoke target | Done | Covered by the gateway tests, including the version-guard flow end to end |
 | Adapters (Wormhole, LayerZero) | Written, compile | Not yet exercised against real transport contracts |
-| Outbox program: prepare / dispatch / finalize | Written, type-checks against anchor-lang 0.30.1 | Not built for SBF, not run on a validator |
-| Wormhole transport module | Skeleton | Account order and fee layout unverified against the deployed bridge |
+| Outbox program: prepare / dispatch / finalize | **Done, executes** | Real SBF build; 5 program-tests through BanksClient; 4 TypeScript tests through the Anchor client on `solana-test-validator` |
+| Wormhole transport module | Skeleton | CPI shape exercised against a mock; account order and fee layout unverified against the deployed bridge |
 | LayerZero transport module | Stub, by design | Needs the official Solana OApp SDK |
-| Testnet end to end | Not started | — |
+| Testnet end to end | Not started | Needs funded devnet and Base Sepolia keys |
 
 ### Phase progress
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| 1 | Envelope, gateway, one adapter, one target | Code complete; testnet run pending |
-| 2 | Second adapter; quorum mode | Gateway side already done and tested; Solana dispatch over two transports written but unrun |
+| 1 | Envelope, gateway, one adapter, one target | Code complete and executing on both sides locally; public-testnet run pending |
+| 2 | Second adapter; quorum mode | Gateway side done and tested; Solana prepare-once-dispatch-twice state machine done and tested |
 | 3 | ACCOUNT mode; fee accounting | Gateway side present and tested, gated off; fee accounting not started |
 | 4 | Audit; mainnet with caps | Not started |
 | 5 | Return path | Not started |
 
-The gateway is ahead of the phasing table because its quorum and ACCOUNT-mode logic were cheap to test once the harness existed. The gap is on the Solana and transport side, where nothing has executed yet.
-
 ### What the tests actually prove
 
-Every row of the failure taxonomy has a case showing the gateway's response: duplicates and terminal conditions return without reverting, parkable ones mark `Failed` and retry, transient ones revert. Beyond that: replay across adapters, quorum with expiry enforced at quorum time, the 63/64 gas floor leaving an under-gassed message untouched, retry with a gas override, strict mode park-then-allow, ACCOUNT-mode deployment at the predicted address and reuse on the second message, a DIRECT call into another sender's account refused (T11), and the config-version pattern: a stale invoke parks, the config lands out of order, a permissionless retry succeeds.
+**Destination side.** Every row of the failure taxonomy has a case showing the gateway's response: duplicates and terminal conditions return without reverting, parkable ones mark `Failed` and retry, transient ones revert. Beyond that: replay across adapters, quorum with expiry enforced at quorum time, the 63/64 gas floor leaving an under-gassed message untouched, retry with a gas override, strict mode park-then-allow, ACCOUNT-mode deployment at the predicted address and reuse on the second message, a DIRECT call into another sender's account refused (T11), and the config-version pattern: a stale invoke parks, the config lands out of order, a permissionless retry succeeds.
+
+**Source side.** The real SBF binary, not a native re-entry: `prepare` assigns nonce 1 and stores an envelope whose header decodes field by field to the spec; `dispatch` performs the CPI with the PDA-signed emitter and sets the transport bit; a second dispatch over the same transport is refused; dispatch over a transport not selected at prepare is refused; `finalize` before every expected transport has dispatched is refused; `finalize` closes the account and refunds rent to the original payer; the next `prepare` is nonce 2, so nonces are gapless. The same flow passes through the TypeScript client against a running validator, which is what an integrator will actually use.
 
 ### Found during implementation
 
 - Three real Anchor errors that reading could not catch and `cargo check` did: a 31-byte placeholder program id, a missing `init-if-needed` cargo feature, and a mutable borrow held across a second borrow of the context in both dispatch instructions.
+- Two `#[error_code]` enums both defaulted to offset 6000 and would have produced colliding error codes; merged.
 - A DIRECT-mode call targeting another sender's smart account would have driven its `execute()` with the gateway as the trusted caller. Every deployed account is now a forbidden target, and the drain attempt is a test.
-- Foundry is unreachable from the build environment; the test suite runs on `@ethereumjs/vm` instead and is portable to Foundry when that is available.
+- Getting Anchor 0.30.1 to build on a 2026 host took four separate fixes, each now captured in the repo rather than in someone's memory: the SBF toolchain's cargo cannot read v4 lockfiles (lockfile committed as v3); the host resolver locks crates the SBF toolchain cannot build (`rust-version` declared, MSRV-aware resolution enabled, `blake3` pinned); Anchor's IDL step runs on `cargo +nightly` and needs a nightly from before April 2025 (`RUSTUP_TOOLCHAIN=nightly-2025-03-10`, `proc-macro2` pinned to 1.0.94); and `solana-program-test`'s dependency tree has to live in its own workspace so it stays out of the programs' lockfile.
+- Foundry is unreachable from the build environment; the gateway suite runs on `@ethereumjs/vm` and is portable to Foundry when available.
 
 ### Next
 
-1. Build the outbox program for SBF and run it on a local validator. The `Prepare` context derives the message PDA from `sender_state.nonce + 1` while `sender_state` is `init_if_needed`; it type-checks, and it should be seen to execute.
-2. One message end to end, devnet to Base Sepolia, over one adapter.
-3. Verify and pin the transport constants: LayerZero's Base endpoint id, Wormhole's consistency-level encoding, core-bridge account ordering.
-4. Wire the LayerZero transport module to the official SDK and add a `quote` instruction.
+1. One message end to end, devnet to Base Sepolia, over one adapter. Needs funded keys and RPC endpoints.
+2. Verify and pin the transport constants: LayerZero's Base endpoint id, Wormhole's consistency-level encoding, core-bridge account ordering. The documentation sites are blocked from the build environment.
+3. Wire the LayerZero transport module to the official SDK and add a `quote` instruction.
+4. Choose the two independent DVN operators for the mainnet configuration path.
 5. Key transport configuration by (transport, destination) before a second chain.
 
-The reference implementation lives on the `claude/nice-noether-i07q6i` branch; `cd evm && npm test` and `cd solana && cargo check -p base-caller` reproduce the checks above.
+The reference implementation lives on the `claude/nice-noether-i07q6i` branch. `cd evm && npm test`, `cd solana && npm run build && npm run test:local` (with a validator running), and `cd solana/program-tests && SBF_OUT_DIR=../target/deploy cargo test` reproduce the checks above.
 
 ## The problem, and the constraint that shapes everything
 

@@ -101,6 +101,10 @@ solana/programs/base-caller/src/
   envelope.rs               canonical encoder (unit-tested, golden vector)
   state.rs                  Config, SenderState, TransportConfig, PreparedMessage
   transports/               wormhole.rs (skeleton), layerzero.rs (stub)
+solana/programs/mock-transport/
+                            localnet stand-in for a bridge: accepts any instruction
+solana/program-tests/       BanksClient tests against the real .so (own workspace)
+solana/tests/outbox.ts      TypeScript end-to-end through the Anchor client
 ```
 
 ## Design decisions at a glance
@@ -137,7 +141,7 @@ This is a design plus a reference implementation, not audited production code.
 | Gateway tests | **28/28 pass** on an in-process EVM: every failure-taxonomy row, replay, quorum, gas floor, retry, strict mode, ACCOUNT mode, T11 account-drain attempt, config-version pattern end to end |
 | `envelope.rs` | **5 unit tests pass**, incl. a frozen golden vector |
 | Cross-language parity | **verified** — Solidity offsets/shifts checked against the bytes Rust actually emits |
-| Anchor program | **type-checks** against anchor-lang 0.30.1 (`cargo check`); not yet built for SBF or run on a validator |
+| Anchor program | **builds for SBF and executes**: 5 program-tests through BanksClient on the real binary, and 4 TypeScript tests through the Anchor client on `solana-test-validator` |
 | `transports/wormhole.rs` | skeleton; account ordering and the fee layout need checking against the deployed core bridge |
 | `transports/layerzero.rs` | deliberate stub — wire to the official Solana OApp SDK rather than hand-encoding the endpoint CPI |
 | Testnet end to end | **not done** — the one thing nothing above covers |
@@ -155,12 +159,34 @@ account ordering, and the bridge config fee offset.
 # EVM: build + 28 gateway tests + cross-language parity
 cd evm && npm install && npm test
 
-# Solana: type-check against real anchor-lang (no SBF toolchain needed)
+# Solana, no toolchain beyond rustup: type-check against real anchor-lang
 cd solana && cargo check -p base-caller
 
-# Envelope codec unit tests (standalone, no Anchor needed)
-# copy envelope.rs into a plain crate and `cargo test`, or run inside the program crate
+# Solana, full: SBF build, IDL, program-tests, and the localnet end-to-end
+cd solana && npm install
+npm run build                                   # cargo build-sbf + IDL + TS types
+(cd program-tests && SBF_OUT_DIR=../target/deploy cargo test)   # BanksClient, real .so
+solana-test-validator -r \
+  --bpf-program $(grep ^base_caller Anchor.toml | cut -d'"' -f2) target/deploy/base_caller.so \
+  --bpf-program $(grep ^mock_transport Anchor.toml | cut -d'"' -f2) target/deploy/mock_transport.so &
+npm run test:local                              # ts-mocha through the Anchor client
 ```
+
+Toolchain the Solana side was verified with: Agave 1.18.26 (`solana`,
+`cargo-build-sbf`, platform-tools v1.41), Anchor CLI 0.30.1, host Rust 1.85.0
+for the workspace plus `nightly-2025-03-10` for Anchor's IDL step. Four things
+about that combination are handled in-repo so they do not need rediscovering:
+
+| Problem | Where it is handled |
+|---|---|
+| platform-tools' cargo cannot read v4 lockfiles | `solana/Cargo.lock` is committed as v3 |
+| Host resolver locks crates the SBF toolchain cannot build | `rust-version = "1.75"` on the programs, `.cargo/config.toml` MSRV-aware resolution, `blake3` pinned to 1.8.2 |
+| Anchor's IDL step runs `cargo +nightly` and needs a pre-April-2025 nightly | npm scripts set `RUSTUP_TOOLCHAIN=nightly-2025-03-10`; `proc-macro2` pinned to 1.0.94 |
+| `solana-program-test` drags a modern dependency tree into the lockfile | `solana/program-tests` is its own workspace |
+
+`anchor test` with its self-managed validator reported the RPC port busy in the
+environment this was built in; `npm run test:local` against a validator you
+start yourself is the path that was verified.
 
 ## Phase one scope, as built
 
@@ -172,12 +198,11 @@ enforced in the gateway -- revert only when redelivery could succeed.
 
 ## Next steps
 
-1. Build the Anchor program for SBF and run it on a local validator; the
-   `Prepare` context's `sender_state.nonce + 1` seed is the one constraint
-   worth seeing execute.
+1. One message end to end on devnet -> Base Sepolia over one adapter. Needs
+   funded keys and RPC endpoints.
 2. Verify the transport constants and pin them.
-3. One message end to end on devnet -> Base Sepolia over one adapter.
-4. Wire `transports/layerzero.rs` to the official SDK; add a `quote`
+3. Wire `transports/layerzero.rs` to the official SDK; add a `quote`
    instruction.
+4. Choose the two independent DVN operators for the mainnet config path.
 5. Key transport config by (transport, destination) before a second chain.
 6. Audit before mainnet.

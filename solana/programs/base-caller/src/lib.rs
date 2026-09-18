@@ -37,7 +37,7 @@ use transports::{
 
 // Placeholder program id (Anchor's canonical example key). Replace with the
 // real deployed id via `anchor keys sync` before any deployment.
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+declare_id!("4zkgELmHMMfMmERXyyfoqyC4kSkQaQf4nJGyYNULb5Gd");
 
 /// Floor on the Base-side gas limit. A message that cannot pay for its own
 /// dispatch overhead is dead on arrival; rejecting it here is cheaper than

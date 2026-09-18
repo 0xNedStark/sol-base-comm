@@ -6,15 +6,15 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-base_caller = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
-mock_transport = "4i7UQSJbAm5fjAL8Y3bhDJSjn8M17B85FTae6qw9Mt4j"
+base_caller = "4zkgELmHMMfMmERXyyfoqyC4kSkQaQf4nJGyYNULb5Gd"
+mock_transport = "7Qe2izm2v1QMzzpYV9JnZccy7gpARhkg6brRfwJmo2Ya"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "Localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "npx ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

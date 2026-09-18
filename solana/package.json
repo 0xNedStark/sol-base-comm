@@ -2,7 +2,9 @@
   "name": "sol-base-comm-solana",
   "private": true,
   "scripts": {
-    "test": "anchor test"
+    "build": "RUSTUP_TOOLCHAIN=1.85.0 anchor build",
+    "test": "RUSTUP_TOOLCHAIN=1.85.0 anchor test",
+    "test:skip-build": "RUSTUP_TOOLCHAIN=1.85.0 anchor test --skip-build"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1"

@@ -1,0 +1,6 @@
+# Anchor 0.30.1's IDL build enables `procmacro2_semver_exempt`, which relies on
+# a proc_macro API that rustc removed in 1.88. Keep the host toolchain for this
+# workspace at a release that still has it. `cargo build-sbf` is unaffected:
+# it compiles with platform-tools' own rustc.
+[toolchain]
+channel = "1.85.0"
