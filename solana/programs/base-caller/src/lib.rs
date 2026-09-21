@@ -33,7 +33,7 @@ use envelope::{CallParams, HEADER_SIZE, MAX_CALLDATA, MODE_ACCOUNT};
 use errors::BaseCallerError;
 use state::{Config, PreparedMessage, SenderState, TransportConfig};
 use transports::{
-    MASK_ALL, MASK_LAYERZERO, MASK_WORMHOLE, TRANSPORT_LAYERZERO, TRANSPORT_WORMHOLE,
+    DISPATCHER_SEED, MASK_LAYERZERO, MASK_WORMHOLE, TRANSPORT_LAYERZERO, TRANSPORT_WORMHOLE,
 };
 
 // Placeholder program id (Anchor's canonical example key). Replace with the
@@ -67,6 +67,7 @@ pub mod base_caller {
         program_id: Pubkey,
         peer: [u8; 32],
         dest_chain: u32,
+        dispatcher: Pubkey,
     ) -> Result<()> {
         require!(
             ctx.accounts.config.admin == ctx.accounts.admin.key(),
@@ -78,6 +79,7 @@ pub mod base_caller {
         t.program_id = program_id;
         t.peer = peer;
         t.dest_chain = dest_chain;
+        t.dispatcher = dispatcher;
         t.bump = ctx.bumps.transport;
         emit!(TransportUpdated {
             transport_id,
@@ -133,11 +135,11 @@ pub mod base_caller {
         let config = &ctx.accounts.config;
         require!(!config.paused, BaseCallerError::Paused);
 
+        // Any non-zero mask is structurally valid: every bit is a transport
+        // id that an admin may register now or later. A bit with no
+        // registered transport simply leaves the message un-finalizable until
+        // it expires, which is visible on-chain.
         require!(transports != 0, BaseCallerError::NoTransports);
-        require!(
-            transports & !MASK_ALL == 0,
-            BaseCallerError::UnknownTransport
-        );
 
         require!(
             params.calldata.len() <= MAX_CALLDATA,
@@ -293,6 +295,60 @@ pub mod base_caller {
             nonce,
             dispatched,
             expected,
+        });
+        Ok(())
+    }
+
+    // ------------------------------------------- externally dispatched
+
+    /// Mark a transport dispatched on behalf of an external dispatcher program.
+    ///
+    /// Some transports cannot be dispatched from inside this program: their
+    /// Solana SDKs pin dependency versions that conflict irreconcilably with
+    /// the ones here (see `TransportConfig::dispatcher`). Such a transport
+    /// ships as its own program, built against whatever stack its SDK
+    /// requires. That program reads the prepared envelope from the account
+    /// passed to it, forwards the bytes to its endpoint, and calls this to
+    /// record that it did.
+    ///
+    /// The envelope is never re-derived or re-encoded here, so a message sent
+    /// this way is byte-identical to the same message over an in-process
+    /// transport, and the destination derives one message id for both. That is
+    /// what keeps the dual-transport quorum reachable across programs.
+    ///
+    /// Authorisation: the caller must sign as the dispatcher's authority PDA,
+    /// which only the registered dispatcher program can produce. A registered
+    /// dispatcher is trusted to have actually sent the message -- the same
+    /// trust already placed in an in-process transport module.
+    pub fn mark_dispatched(
+        ctx: Context<MarkDispatched>,
+        nonce: u64,
+        transport_id: u8,
+    ) -> Result<()> {
+        require!(!ctx.accounts.config.paused, BaseCallerError::Paused);
+        let transport = &ctx.accounts.transport;
+        require!(transport.enabled, BaseCallerError::TransportDisabled);
+        require!(
+            transport.dispatcher != Pubkey::default(),
+            BaseCallerError::NoDispatcher
+        );
+
+        let expected = Pubkey::find_program_address(&[DISPATCHER_SEED], &transport.dispatcher).0;
+        require!(
+            ctx.accounts.dispatcher_authority.key() == expected,
+            BaseCallerError::NotDispatcher
+        );
+
+        let mask = transports::mask_of(transport_id).ok_or(BaseCallerError::UnknownTransport)?;
+        let msg = &mut ctx.accounts.message;
+        mark_dispatch(msg, mask)?;
+
+        emit!(CallDispatched {
+            transport_id,
+            sender: msg.authority,
+            nonce,
+            dispatched: msg.dispatched,
+            expected: msg.expected,
         });
         Ok(())
     }
@@ -581,6 +637,33 @@ pub struct DispatchViaLayerZero<'info> {
     pub oapp: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+/// Accounts for `mark_dispatched`. Deliberately small: an external dispatcher
+/// needs no bridge accounts here, because it has already talked to its own
+/// endpoint by the time it calls this.
+#[derive(Accounts)]
+#[instruction(nonce: u64, transport_id: u8)]
+pub struct MarkDispatched<'info> {
+    #[account(seeds = [Config::SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        seeds = [TransportConfig::SEED, &[transport_id]],
+        bump = transport.bump
+    )]
+    pub transport: Account<'info, TransportConfig>,
+    #[account(
+        mut,
+        seeds = [PreparedMessage::SEED, authority.key().as_ref(), &nonce.to_le_bytes()],
+        bump = message.bump,
+        has_one = authority
+    )]
+    pub message: Account<'info, PreparedMessage>,
+    /// CHECK: only used to derive the message PDA; `has_one` pins it.
+    pub authority: UncheckedAccount<'info>,
+    /// CHECK: must be the registered dispatcher program's authority PDA,
+    /// checked in the handler. Only that program can sign as it.
+    pub dispatcher_authority: Signer<'info>,
 }
 
 #[derive(Accounts)]

@@ -11,7 +11,9 @@ use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use base_caller::envelope::{CHAIN_BASE, HEADER_SIZE, MODE_DIRECT, SRC_CHAIN_SOLANA};
 use base_caller::errors::BaseCallerError;
 use base_caller::state::{Config, PreparedMessage, SenderState, TransportConfig};
-use base_caller::transports::{MASK_LAYERZERO, MASK_WORMHOLE, TRANSPORT_WORMHOLE};
+use base_caller::transports::{
+    MASK_LAYERZERO, MASK_WORMHOLE, TRANSPORT_LAYERZERO, TRANSPORT_WORMHOLE,
+};
 use base_caller::SendParams;
 use solana_program_test::*;
 use solana_sdk::{
@@ -118,10 +120,66 @@ impl Env {
                 program_id: self.mock_wh,
                 peer: [0xAA; 32],
                 dest_chain: 30,
+                dispatcher: Pubkey::default(), // dispatched in-process
             }
             .data(),
         };
         self.send(ix, &[]).await.unwrap();
+    }
+
+    fn lz_transport(&self) -> Pubkey {
+        Pubkey::find_program_address(
+            &[TransportConfig::SEED, &[TRANSPORT_LAYERZERO]],
+            &self.program_id,
+        )
+        .0
+    }
+
+    /// Register LayerZero with the mock program as its EXTERNAL dispatcher --
+    /// the arrangement a transport whose SDK cannot be linked in must use.
+    async fn set_layerzero_external(&mut self) {
+        let ix = Instruction {
+            program_id: self.program_id,
+            accounts: base_caller::accounts::SetTransport {
+                config: self.config,
+                transport: self.lz_transport(),
+                admin: self.payer.pubkey(),
+                system_program: system_program::id(),
+            }
+            .to_account_metas(None),
+            data: base_caller::instruction::SetTransport {
+                transport_id: TRANSPORT_LAYERZERO,
+                enabled: true,
+                program_id: self.mock_wh,
+                peer: [0xBB; 32],
+                dest_chain: 30184,
+                dispatcher: self.mock_wh,
+            }
+            .data(),
+        };
+        self.send(ix, &[]).await.unwrap();
+    }
+
+    /// Drive the mock as an external dispatcher: it CPIs back into
+    /// `mark_dispatched`, signing as its own dispatcher PDA.
+    async fn external_dispatch(&mut self, authority: &Pubkey, nonce: u64) -> Result<(), TransactionError> {
+        let dispatcher_authority =
+            Pubkey::find_program_address(&[b"dispatcher"], &self.mock_wh).0;
+        let ix = Instruction {
+            program_id: self.mock_wh,
+            accounts: mock_transport::accounts::DispatchAndMark {
+                base_caller_program: self.program_id,
+                config: self.config,
+                transport: self.lz_transport(),
+                message: self.message(authority, nonce),
+                authority: *authority,
+                dispatcher_authority,
+            }
+            .to_account_metas(None),
+            data: mock_transport::instruction::DispatchAndMark { nonce, transport_id: TRANSPORT_LAYERZERO }
+                .data(),
+        };
+        self.send(ix, &[]).await
     }
 
     fn params() -> SendParams {
@@ -278,9 +336,9 @@ async fn prepare_validation() {
     // no transports selected
     let err = env.prepare(&authority, 1, 0).await.unwrap_err();
     assert_eq!(err, custom(BaseCallerError::NoTransports));
-    // unknown transport bit
-    let err = env.prepare(&authority, 1, 0b1000_0000).await.unwrap_err();
-    assert_eq!(err, custom(BaseCallerError::UnknownTransport));
+    // A bit with no transport registered yet is structurally valid -- ids are
+    // registered by an admin, not baked into the program.
+    env.prepare(&authority, 1, 0b1000_0000).await.unwrap();
 }
 
 #[tokio::test]
@@ -298,4 +356,74 @@ async fn paused_program_refuses_prepare() {
     let authority = Keypair::new();
     let err = env.prepare(&authority, 1, MASK_WORMHOLE).await.unwrap_err();
     assert_eq!(err, custom(BaseCallerError::Paused));
+}
+
+/// The finding that forced this interface: LayerZero's Solana endpoint pins
+/// `solana-program = "=1.17.31"` and anchor-lang 0.29, while the Wormhole
+/// Anchor SDK needs 1.18 / 0.30.1. `solana-program` can appear only once in a
+/// binary, so no single program can dispatch over both. A transport on an
+/// incompatible stack therefore ships as its own program and calls back here.
+///
+/// What matters for the design is that a message dispatched this way is
+/// byte-identical to one dispatched in-process, so the destination derives one
+/// message id for both and the dual-transport quorum still works.
+#[tokio::test]
+async fn external_dispatcher_marks_a_transport_without_being_linked_in() {
+    let mut env = Env::new().await;
+    env.initialize().await;
+    env.set_wormhole_transport().await;
+    env.set_layerzero_external().await;
+    let authority = Keypair::new();
+
+    // One prepared envelope, both transports expected.
+    env.prepare(&authority, 1, MASK_WORMHOLE | MASK_LAYERZERO).await.unwrap();
+    let before: PreparedMessage = env.account(env.message(&authority.pubkey(), 1)).await.unwrap();
+    let envelope = before.envelope.clone();
+
+    // In-process transport.
+    env.dispatch_wormhole(&authority.pubkey(), 1).await.unwrap();
+    // Out-of-process transport, via a separate program.
+    env.external_dispatch(&authority.pubkey(), 1).await.unwrap();
+
+    let after: PreparedMessage = env.account(env.message(&authority.pubkey(), 1)).await.unwrap();
+    assert_eq!(after.dispatched, MASK_WORMHOLE | MASK_LAYERZERO);
+    assert_eq!(after.envelope, envelope, "the envelope is never re-encoded");
+
+    // Both transports done, so the message can now be closed.
+    env.finalize(&authority.pubkey(), 1).await.unwrap();
+}
+
+#[tokio::test]
+async fn external_dispatch_is_refused_without_the_dispatcher_signature() {
+    let mut env = Env::new().await;
+    env.initialize().await;
+    env.set_wormhole_transport().await;
+    let authority = Keypair::new();
+    env.prepare(&authority, 1, MASK_LAYERZERO).await.unwrap();
+
+    // LayerZero registered with NO external dispatcher: the callback path is
+    // closed even though the transport itself is enabled.
+    let ix = Instruction {
+        program_id: env.program_id,
+        accounts: base_caller::accounts::SetTransport {
+            config: env.config,
+            transport: env.lz_transport(),
+            admin: env.payer.pubkey(),
+            system_program: system_program::id(),
+        }
+        .to_account_metas(None),
+        data: base_caller::instruction::SetTransport {
+            transport_id: TRANSPORT_LAYERZERO,
+            enabled: true,
+            program_id: env.mock_wh,
+            peer: [0xBB; 32],
+            dest_chain: 30184,
+            dispatcher: Pubkey::default(),
+        }
+        .data(),
+    };
+    env.send(ix, &[]).await.unwrap();
+
+    let err = env.external_dispatch(&authority.pubkey(), 1).await.unwrap_err();
+    assert_eq!(err, custom(BaseCallerError::NoDispatcher));
 }

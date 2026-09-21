@@ -1,23 +1,37 @@
 //! LayerZero v2 transport.
 //!
-//! STATUS: intentionally a stub. Unlike Wormhole's core bridge, whose
-//! `post_message` is a stable single instruction that is reasonable to encode by
-//! hand, the LayerZero send path involves the endpoint's message library
-//! resolution, DVN configuration and a dynamic account list that the official
-//! Solana OApp SDK derives for you. Hand-rolling it would be guesswork that
-//! looks like working code, which is worse than an explicit stub.
+//! STATUS: cannot be dispatched from inside this program, and not for want of
+//! effort. LayerZero's Solana endpoint pins `solana-program = "=1.17.31"` and
+//! anchor-lang 0.29; `oapp-latest` pins 2.3 and 0.32.1. The Wormhole Anchor
+//! SDK this program uses needs 1.18 / 0.30.1, and `solana-program` can appear
+//! only once in a binary. Attempting the dependency fails at resolution, not
+//! at compile time:
 //!
-//! To complete:
-//!   1. Add the LayerZero Solana OApp crate as a dependency.
-//!   2. Replace `send` below with the SDK's send CPI, passing `envelope`
-//!      unmodified as the message payload.
-//!   3. Build options with the SDK's options builder from `gas_limit` (and a
-//!      native-drop amount if the envelope carries a non-zero `value`).
-//!   4. Add a `quote` instruction wrapping the SDK's quote so clients can size
-//!      `native_fee` before sending.
-//!   5. Configure the DVN set. Two independent DVNs is the configuration that
-//!      makes LayerZero the recommended default; one DVN gives up that
-//!      advantage. See docs/03-transport-comparison.md.
+//!   error: failed to select a version for `solana-program`
+//!       ... required by package `endpoint` (LayerZero-v2)
+//!       versions that meet the requirements `=1.17.31` are: 1.17.31
+//!       all possible versions conflict with previously selected packages
+//!
+//! So LayerZero ships as an EXTERNAL DISPATCHER: its own program, built
+//! against whatever stack `oapp` requires, which reads the prepared envelope,
+//! forwards those exact bytes to the endpoint, and calls
+//! `base_caller::mark_dispatched` back here. See `TransportConfig::dispatcher`
+//! and the `external_dispatcher_*` tests. Nothing in this file is needed for
+//! that path; it stays as the marker for where an in-process implementation
+//! would go if the version conflict ever resolves.
+//!
+//! To build that dispatcher:
+//!   1. New Anchor workspace, anchor-lang and solana-program matching `oapp`.
+//!   2. Depend on `oapp` from the LayerZero-v2 git repo.
+//!   3. On dispatch: read `PreparedMessage.envelope`, pass it UNMODIFIED as
+//!      the message payload to `oapp::endpoint_cpi::send`. Re-encoding it
+//!      changes the destination's message id and breaks quorum.
+//!   4. Build options from the envelope's gas_limit with the SDK's builder.
+//!   5. CPI `base_caller::mark_dispatched`, signing as the PDA seeded
+//!      `["dispatcher"]` of the dispatcher program.
+//!   6. Register it: `set_transport(TRANSPORT_LAYERZERO, .., dispatcher = <its id>)`.
+//!   7. Configure the DVN set -- two independent DVNs is what makes LayerZero
+//!      the recommended default; one gives up that advantage.
 
 use anchor_lang::prelude::*;
 
@@ -38,7 +52,7 @@ pub fn send(
     _native_fee: u64,
     _gas_limit: u64,
 ) -> Result<()> {
-    // See the module docs. Wire this to the official SDK rather than encoding
-    // the endpoint CPI by hand.
-    unimplemented!("wire to the LayerZero Solana OApp SDK before use")
+    // Unreachable by construction: no instruction of this program calls it.
+    // LayerZero is dispatched out of process; see the module docs.
+    unimplemented!("LayerZero dispatches out of process -- see the module docs")
 }

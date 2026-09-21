@@ -45,15 +45,27 @@ pub struct TransportConfig {
     /// program. Trust is mutual and explicit at both ends; neither side accepts
     /// a message merely because it arrived over the right transport.
     pub peer: [u8; 32],
-    /// Base's id *in this transport's namespace* (Wormhole: 30, LayerZero:
-    /// 30184 -- confirm before deploy). Never the internal chain id.
+    /// The destination's id *in this transport's namespace* (Wormhole: Base
+    /// is 30; LayerZero: Base is 30184). Never the internal chain id.
     pub dest_chain: u32,
+    /// Program allowed to mark this transport dispatched from outside, or
+    /// `Pubkey::default()` for transports dispatched by an instruction of this
+    /// program.
+    ///
+    /// This exists because some transport SDKs cannot be linked into this
+    /// program at all. LayerZero's Solana endpoint pins
+    /// `solana-program = "=1.17.31"` and anchor-lang 0.29, while the Wormhole
+    /// Anchor SDK needs 1.18 / 0.30.1; solana-program can only appear once in
+    /// a binary, so no single program can carry both. A transport on an
+    /// incompatible stack therefore ships as its own program that reads the
+    /// prepared envelope and calls `mark_dispatched` here.
+    pub dispatcher: Pubkey,
     pub bump: u8,
 }
 
 impl TransportConfig {
     pub const SEED: &'static [u8] = b"transport";
-    pub const LEN: usize = 8 + 1 + 1 + 32 + 32 + 4 + 1;
+    pub const LEN: usize = 8 + 1 + 1 + 32 + 32 + 4 + 32 + 1;
 }
 
 /// An envelope built once and awaiting dispatch over one or more transports.

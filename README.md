@@ -100,10 +100,12 @@ solana/programs/base-caller/src/
   lib.rs                    prepare / dispatch_via_* / finalize, accounts, validation
   envelope.rs               canonical encoder (unit-tested, golden vector)
   state.rs                  Config, SenderState, TransportConfig, PreparedMessage
-  transports/               wormhole.rs (skeleton), layerzero.rs (stub)
+  transports/               wormhole.rs (official SDK), layerzero.rs (see below)
 solana/programs/mock-transport/
                             localnet stand-in for a bridge: accepts any instruction
 solana/program-tests/       BanksClient tests against the real .so (own workspace)
+solana/scripts/pin-lockfile.py
+                            re-pins Cargo.lock after any dependency change
 solana/tests/outbox.ts      TypeScript end-to-end through the Anchor client
 ```
 
@@ -141,17 +143,46 @@ This is a design plus a reference implementation, not audited production code.
 | Gateway tests | **28/28 pass** on an in-process EVM: every failure-taxonomy row, replay, quorum, gas floor, retry, strict mode, ACCOUNT mode, T11 account-drain attempt, config-version pattern end to end |
 | `envelope.rs` | **5 unit tests pass**, incl. a frozen golden vector |
 | Cross-language parity | **verified** — Solidity offsets/shifts checked against the bytes Rust actually emits |
-| Anchor program | **builds for SBF and executes**: 5 program-tests through BanksClient on the real binary, and 4 TypeScript tests through the Anchor client on `solana-test-validator` |
-| `transports/wormhole.rs` | skeleton; account ordering and the fee layout need checking against the deployed core bridge |
-| `transports/layerzero.rs` | deliberate stub — wire to the official Solana OApp SDK rather than hand-encoding the endpoint CPI |
+| Anchor program | **builds for SBF and executes**: 7 program-tests through BanksClient on the real binary, and 4 TypeScript tests through the Anchor client on `solana-test-validator` |
+| `transports/wormhole.rs` | uses `wormhole-anchor-sdk`, the bridge's own bindings: instruction layout, account order and `Finality` come from the source |
+| `transports/layerzero.rs` | **cannot be in-process** — LayerZero's endpoint pins `solana-program = "=1.17.31"` against Wormhole's 1.18. Ships as an external dispatcher program instead (see below) |
 | Testnet end to end | **not done** — the one thing nothing above covers |
 
-**Constants to verify before deploying anything with value.** The docs sites for
-LayerZero and Wormhole were not reachable from the environment this was written
-in. Verified: Wormhole chain ids (Solana 1, Base 30) and LayerZero's Solana
-endpoint id (30168). Unverified and marked in-source: LayerZero's Base endpoint
-id (believed 30184), Wormhole's numeric consistency-level encoding, core bridge
-account ordering, and the bridge config fee offset.
+**Transport constants are verified**, read from the vendors' own published npm
+packages rather than documentation (npm is not behind the egress proxy that
+blocks their docs sites):
+
+| | Source | Value |
+|---|---|---|
+| LayerZero endpoint ids | `layerzerolabs/lz-definitions` | Solana 30168 / 40168, Base 30184 / Sepolia 40245 |
+| Wormhole chain ids | `wormhole-foundation/sdk-base` | Solana 1, Ethereum 2, Base 30, Base Sepolia 10004 |
+| Wormhole consistency level | `wormhole-anchor-sdk` | `Confirmed` 0, `Finalized` 1 |
+| Core bridge accounts and fee | `wormhole-anchor-sdk` | taken from the SDK, not transcribed |
+
+## Two transports cannot share one Solana program
+
+Found by attempting the integration, not by reading about it:
+
+| | anchor-lang | solana-program |
+|---|---|---|
+| Wormhole `wormhole-anchor-sdk` | 0.30.1 | 1.18 |
+| LayerZero `oapp` | 0.29 | **=1.17.31** (exact) |
+| LayerZero `oapp-latest` | 0.32.1 | 2.3 |
+
+`solana-program` can appear only once in a binary and LayerZero pins it
+exactly, so no single program can dispatch over both.
+
+The prepare/dispatch split absorbs this. A transport whose SDK cannot be
+linked in ships as its own program: it reads the prepared envelope, forwards
+those bytes to its endpoint, and calls `mark_dispatched` on the outbox,
+signing as a PDA of itself that the outbox has registered. The envelope is
+never re-derived, so the message id is identical to the in-process path and
+the dual-transport quorum still works. `programs/mock-transport` demonstrates
+the callback; `external_dispatcher_marks_a_transport_without_being_linked_in`
+proves the envelope is unchanged.
+
+Transport ids map to bitmask bits arithmetically, so registering an external
+transport is an admin action with **no upgrade to the outbox**.
 
 ## Running the checks
 
@@ -200,9 +231,9 @@ enforced in the gateway -- revert only when redelivery could succeed.
 
 1. One message end to end on devnet -> Base Sepolia over one adapter. Needs
    funded keys and RPC endpoints.
-2. Verify the transport constants and pin them.
-3. Wire `transports/layerzero.rs` to the official SDK; add a `quote`
-   instruction.
+2. Build the LayerZero dispatcher as its own program against `oapp`
+   (anchor 0.29 / solana 1.17) or `oapp-latest` (anchor 0.32 / solana 2.3),
+   and register it with `set_transport`. No outbox change needed.
 4. Choose the two independent DVN operators for the mainnet config path.
 5. Key transport config by (transport, destination) before a second chain.
 6. Audit before mainnet.

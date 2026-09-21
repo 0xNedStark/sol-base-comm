@@ -55,7 +55,8 @@ describe("base_caller on localnet", () => {
     await program.methods.initialize(payer.publicKey)
       .accountsPartial({ config, payer: payer.publicKey, systemProgram: SystemProgram.programId })
       .rpc();
-    await program.methods.setTransport(TRANSPORT_WORMHOLE, true, mock.programId, Array.from(Buffer.alloc(32, 0xaa)), 30)
+    await program.methods
+      .setTransport(TRANSPORT_WORMHOLE, true, mock.programId, Array.from(Buffer.alloc(32, 0xaa)), 30, PublicKey.default)
       .accountsPartial({ config, transport, admin: payer.publicKey, systemProgram: SystemProgram.programId })
       .rpc();
     const t = await program.account.transportConfig.fetch(transport);

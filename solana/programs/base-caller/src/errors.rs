@@ -39,4 +39,8 @@ pub enum BaseCallerError {
     NotFullyDispatched,
     #[msg("Prepared message has expired; finalize to reclaim rent")]
     PreparedExpired,
+    #[msg("This transport has no external dispatcher registered")]
+    NoDispatcher,
+    #[msg("Signer is not the registered dispatcher's authority PDA")]
+    NotDispatcher,
 }
