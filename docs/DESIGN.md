@@ -24,10 +24,12 @@ Phase one is implemented and verified on both chains in-process and on a local v
 | Envelope codec, Rust and Solidity | Done | 5 unit tests, frozen golden vector, cross-language parity on the 103-byte layout |
 | Gateway | Done, phase-one scope | 28 behaviour tests on an in-process Cancun EVM |
 | Callable base + config-invoke target | Done | Covered by the gateway tests, including the version-guard flow end to end |
+| Transport constants | **Verified** | Read from the vendors' own published npm packages, not documentation |
+| Wormhole transport (Solana) | Done | Uses `wormhole-anchor-sdk`, the bridge's own bindings; CPI exercised against a mock |
+| Outbox program: prepare / dispatch / finalize / mark\_dispatched | Done, executes | Real SBF build; 7 program-tests through BanksClient; 4 TypeScript tests on `solana-test-validator` |
+| External dispatcher interface | Done | A separate program drives a transport and calls back, with the envelope proven unchanged |
 | Adapters (Wormhole, LayerZero) | Written, compile | Not yet exercised against real transport contracts |
-| Outbox program: prepare / dispatch / finalize | **Done, executes** | Real SBF build; 5 program-tests through BanksClient; 4 TypeScript tests through the Anchor client on `solana-test-validator` |
-| Wormhole transport module | Skeleton | CPI shape exercised against a mock; account order and fee layout unverified against the deployed bridge |
-| LayerZero transport module | Stub, by design | Needs the official Solana OApp SDK |
+| LayerZero transport (Solana) | **Blocked in-process**; must be an external dispatcher | Dependency conflict proven by attempting the build |
 | Testnet end to end | Not started | Needs funded devnet and Base Sepolia keys |
 
 ### Phase progress
@@ -48,19 +50,22 @@ Phase one is implemented and verified on both chains in-process and on a local v
 
 ### Found during implementation
 
+- **LayerZero and Wormhole cannot share a Solana program.** LayerZero's endpoint pins `solana-program = "=1.17.31"`; the Wormhole Anchor SDK needs 1.18. Attempting the dependency is what proved it. The design assumed both transports would be instructions of one program; they cannot be, and the external-dispatcher interface above is the answer.
+- The transport constants the design had marked unverified are verifiable after all: the vendors publish them in npm packages, and npm is not behind the egress proxy that blocks their documentation sites. Base's LayerZero endpoint id is 30184 as believed; Wormhole's `Finality` enum serialises `Finalized` to 1, so the consistency level was right.
+- Switching the Wormhole CPI to the bridge's own SDK removed two hand-rolled things worth removing: a fee read at a hard-coded byte offset, and three bridge accounts that were unchecked and are now derived from the configured program id.
 - Three real Anchor errors that reading could not catch and `cargo check` did: a 31-byte placeholder program id, a missing `init-if-needed` cargo feature, and a mutable borrow held across a second borrow of the context in both dispatch instructions.
 - Two `#[error_code]` enums both defaulted to offset 6000 and would have produced colliding error codes; merged.
 - A DIRECT-mode call targeting another sender's smart account would have driven its `execute()` with the gateway as the trusted caller. Every deployed account is now a forbidden target, and the drain attempt is a test.
-- Getting Anchor 0.30.1 to build on a 2026 host took four separate fixes, each now captured in the repo rather than in someone's memory: the SBF toolchain's cargo cannot read v4 lockfiles (lockfile committed as v3); the host resolver locks crates the SBF toolchain cannot build (`rust-version` declared, MSRV-aware resolution enabled, `blake3` pinned); Anchor's IDL step runs on `cargo +nightly` and needs a nightly from before April 2025 (`RUSTUP_TOOLCHAIN=nightly-2025-03-10`, `proc-macro2` pinned to 1.0.94); and `solana-program-test`'s dependency tree has to live in its own workspace so it stays out of the programs' lockfile.
+- Getting Anchor 0.30.1 to build on a 2026 host took four separate fixes, each now captured in the repo rather than in someone's memory: the SBF toolchain's cargo cannot read v4 lockfiles; the host resolver locks crates the SBF toolchain cannot build; Anchor's IDL step runs on `cargo +nightly` and needs a nightly from before April 2025; and `solana-program-test`'s dependency tree has to live in its own workspace. `scripts/pin-lockfile.py` now automates the lockfile half of that.
 - Foundry is unreachable from the build environment; the gateway suite runs on `@ethereumjs/vm` and is portable to Foundry when available.
 
 ### Next
 
-1. One message end to end, devnet to Base Sepolia, over one adapter. Needs funded keys and RPC endpoints.
-2. Verify and pin the transport constants: LayerZero's Base endpoint id, Wormhole's consistency-level encoding, core-bridge account ordering. The documentation sites are blocked from the build environment.
-3. Wire the LayerZero transport module to the official SDK and add a `quote` instruction.
-4. Choose the two independent DVN operators for the mainnet configuration path.
-5. Key transport configuration by (transport, destination) before a second chain.
+1. One message end to end, devnet to Base Sepolia, over Wormhole. That path is complete in code; it needs funded keys and RPC endpoints.
+2. Build the LayerZero dispatcher as its own program against `oapp` (anchor 0.29 / solana 1.17) or `oapp-latest` (anchor 0.32 / solana 2.3), and register it with `set_transport`. No change to the outbox.
+3. Choose the two independent DVN operators for the mainnet configuration path.
+4. Key transport configuration by (transport, destination) before a second destination chain.
+5. Audit before mainnet.
 
 The reference implementation lives on the `claude/nice-noether-i07q6i` branch. `cd evm && npm test`, `cd solana && npm run build && npm run test:local` (with a validator running), and `cd solana/program-tests && SBF_OUT_DIR=../target/deploy cargo test` reproduce the checks above.
 
@@ -369,20 +374,27 @@ Agnostic where lock-in would hurt; not agnostic on the Solana program, by design
 
 On the destination side, leaving a bridge therefore costs one adapter contract of roughly a hundred lines and one `setAdapter` call. Nothing else moves.
 
-**On Solana, adding a bridge is a program upgrade, and that is the right trade.** Each dispatch instruction declares up front exactly which accounts it expects and what must be true of them — this one a PDA with these seeds, that one signed, this address equal to the configured bridge program. Anchor enforces all of it before any code runs, and anyone auditing can read the account struct and know what is checked.
+**On Solana the constraint is harder, and it is not about code structure.** Transport SDKs pin their whole dependency stack, and the stacks do not agree:
 
-A generic `dispatch(transport_id, …)` taking an arbitrary account list would have to perform those same checks by hand, in code, per transport. Same checks, but imperative, easy to get subtly wrong, and invisible to a reader of the struct. "Forgot to verify that account was the real bridge program" is precisely the shape of bug that drains cross-chain systems.
-
-So the choice is: pay a program upgrade per new bridge, or weaken account validation on every dispatch forever. An upgrade is a one-time, well-understood operation behind the multisig. Weakened validation is permanent. The upgrade is cheaper.
-
-**The asymmetry is what makes it acceptable.** Ask who else must change when a bridge is added. On the destination: nobody — no integrator redeploys, no state migrates. On Solana: the operator, once, with an upgrade they control. The cost lands entirely on the party who chose to add the bridge and touches no one else's contracts or funds. That is the property an extension point should have.
-
-**Concretely, adding a third transport:**
-
-| Side | Steps | Who is affected |
+|  | anchor-lang | solana-program |
 | --- | --- | --- |
-| Destination | Write the adapter (three checks, forward bytes); `setAdapter`; optionally raise `requiredConfirmations` on valuable targets | Nobody else. In-flight messages on existing transports still land |
-| Solana | Write the transport module and its dispatch instruction with its own account context; add a mask bit; upgrade behind the multisig; `set_transport` to register the peer | Callers who want the new transport pass its bit at `prepare`. Everyone else changes nothing |
+| Wormhole `wormhole-anchor-sdk` | 0.30.1 | 1.18 |
+| LayerZero `oapp` | 0.29 | **=1.17.31** (exact) |
+| LayerZero `oapp-latest` | 0.32.1 | 2.3 |
+
+`solana-program` can appear only once in a binary, and LayerZero's endpoint pins it exactly. **No single Solana program can dispatch over both Wormhole and LayerZero.** This is not a limitation of the design; it is a property of the ecosystem today, and it was found by attempting the integration rather than by reading about it.
+
+**The prepare/dispatch split absorbs it.** Because the envelope is already built once into a PDA and dispatched separately, a transport whose SDK cannot be linked in ships as *its own program*: it reads the prepared envelope, forwards those exact bytes to its endpoint, and calls `mark_dispatched` back on the outbox, signing as a PDA of itself that the outbox has registered. The envelope is never re-derived, so a message sent this way is byte-identical to one sent in-process and the destination derives one message id for both. The dual-transport quorum survives the split intact.
+
+**Which makes the Solana side more extensible than it first appeared.** Transport ids map to bitmask bits arithmetically, so registering a new transport is an admin action, not a code change:
+
+| Adding a transport | Cost |
+| --- | --- |
+| Destination chain | An adapter contract and one `setAdapter` call. No integrator redeploys. |
+| Solana, external dispatcher | A separate program plus one `set_transport` registration. **No upgrade to the outbox.** |
+| Solana, in-process | An instruction on the outbox, and an upgrade. Only worth it when the SDK links cleanly. |
+
+The asymmetry still holds and is now sharper: adding a transport touches nobody else's contracts or funds, and in the external case touches nobody else's *program* either.
 
 **One honest caveat.** "Agnostic" is a property of this code, not a guarantee about every conceivable bridge. Quorum works only if every adapter can hand the gateway byte-identical envelopes. Every protocol in the comparison table delivers opaque payloads, so this holds. A bridge that re-encoded payloads in transit could still be used alone, but could not serve as a second vote.
 
