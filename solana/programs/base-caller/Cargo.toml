@@ -10,7 +10,15 @@ crate-type = ["cdylib", "lib"]
 name = "base_caller"
 
 [features]
-default = []
+# The Wormhole SDK declares the core bridge program id under a cfg_if, so
+# exactly one of its network features must be on or it will not compile. This
+# program does NOT read that id -- the bridge address comes from
+# TransportConfig at runtime, so one binary can talk to a mock on localnet --
+# but the feature still has to be selected. Default to mainnet.
+default = ["wormhole-mainnet"]
+wormhole-mainnet = ["wormhole-anchor-sdk/mainnet"]
+wormhole-devnet = ["wormhole-anchor-sdk/solana-devnet"]
+wormhole-localnet = ["wormhole-anchor-sdk/tilt-devnet"]
 cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
@@ -19,3 +27,10 @@ idl-build = ["anchor-lang/idl-build"]
 
 [dependencies]
 anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+# Official Wormhole CPI bindings. Replaces hand-encoding post_message: the
+# instruction layout, account ordering and Finality encoding come from the
+# bridge's own SDK rather than from this repo's reading of the docs.
+# default-features off: the SDK's `mainnet` feature pins the core bridge
+# program id at compile time, but this program takes it from TransportConfig
+# so the same binary works against a mock on localnet.
+wormhole-anchor-sdk = { version = "0.30.1-alpha.3", default-features = false }

@@ -1,0 +1,5 @@
+# Same policy as the programs workspace: rust-toolchain.toml pins the host
+# toolchain to 1.85.0, so ask the resolver to honour this crate's rust-version
+# rather than locking dependencies that need a newer compiler.
+[resolver]
+incompatible-rust-versions = "fallback"

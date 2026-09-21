@@ -22,6 +22,7 @@
 //! Wire format:  docs/02-message-format.md
 
 use anchor_lang::prelude::*;
+use wormhole_anchor_sdk::wormhole;
 
 pub mod envelope;
 pub mod errors;
@@ -133,7 +134,10 @@ pub mod base_caller {
         require!(!config.paused, BaseCallerError::Paused);
 
         require!(transports != 0, BaseCallerError::NoTransports);
-        require!(transports & !MASK_ALL == 0, BaseCallerError::UnknownTransport);
+        require!(
+            transports & !MASK_ALL == 0,
+            BaseCallerError::UnknownTransport
+        );
 
         require!(
             params.calldata.len() <= MAX_CALLDATA,
@@ -322,8 +326,14 @@ pub mod base_caller {
 /// Shared dispatch bookkeeping. Refuses an unexpected or repeated transport
 /// and an expired message, then records the bit.
 fn mark_dispatch(msg: &mut Account<PreparedMessage>, mask: u8) -> Result<()> {
-    require!(msg.expected & mask != 0, BaseCallerError::TransportNotExpected);
-    require!(msg.dispatched & mask == 0, BaseCallerError::AlreadyDispatched);
+    require!(
+        msg.expected & mask != 0,
+        BaseCallerError::TransportNotExpected
+    );
+    require!(
+        msg.dispatched & mask == 0,
+        BaseCallerError::AlreadyDispatched
+    );
     if msg.expiry != 0 {
         let now = Clock::get()?.unix_timestamp as u64;
         require!(now <= msg.expiry, BaseCallerError::PreparedExpired);
@@ -491,23 +501,43 @@ pub struct DispatchViaWormhole<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
 
-    // --- Wormhole core bridge accounts. Verify the exact set and ordering
-    // --- against the deployed core bridge before mainnet.
-    /// CHECK: validated by the core bridge
-    #[account(mut)]
+    // --- Wormhole core bridge accounts.
+    //
+    // The three bridge-owned accounts are derived here from the configured
+    // bridge program id using the SDK's own seed prefixes, rather than taken
+    // on trust. The core bridge validates them too, but deriving them at this
+    // boundary means a caller cannot substitute an account and have the
+    // failure surface somewhere less obvious.
+    /// CHECK: PDA ["Bridge"] of the configured bridge program; read for the fee.
+    #[account(
+        mut,
+        seeds = [wormhole::BridgeData::SEED_PREFIX],
+        bump,
+        seeds::program = transport.program_id
+    )]
     pub wormhole_bridge: UncheckedAccount<'info>,
-    /// CHECK: message account, created by this instruction
+    /// CHECK: message account, created by the bridge during this instruction.
     #[account(mut)]
     pub wormhole_message: Signer<'info>,
-    /// CHECK: PDA of this program, seeds ["emitter"] -- this is the identity the
-    /// Base-side WormholeAdapter pins as `solanaPeer`.
-    #[account(seeds = [b"emitter"], bump)]
+    /// CHECK: PDA of THIS program, seeds ["emitter"] -- the identity the
+    /// destination-side WormholeAdapter pins as `solanaPeer`.
+    #[account(seeds = [wormhole::SEED_PREFIX_EMITTER], bump)]
     pub wormhole_emitter: UncheckedAccount<'info>,
-    /// CHECK: validated by the core bridge
-    #[account(mut)]
+    /// CHECK: PDA ["Sequence", emitter] of the configured bridge program.
+    #[account(
+        mut,
+        seeds = [wormhole::SequenceTracker::SEED_PREFIX, wormhole_emitter.key().as_ref()],
+        bump,
+        seeds::program = transport.program_id
+    )]
     pub wormhole_sequence: UncheckedAccount<'info>,
-    /// CHECK: validated by the core bridge
-    #[account(mut)]
+    /// CHECK: PDA ["fee_collector"] of the configured bridge program.
+    #[account(
+        mut,
+        seeds = [wormhole::FeeCollector::SEED_PREFIX],
+        bump,
+        seeds::program = transport.program_id
+    )]
     pub wormhole_fee_collector: UncheckedAccount<'info>,
     /// CHECK: address checked against transport.program_id
     #[account(address = transport.program_id)]

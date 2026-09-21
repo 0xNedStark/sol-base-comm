@@ -61,6 +61,21 @@ impl Env {
         Some(T::try_deserialize(&mut &acc.data[..]).unwrap())
     }
 
+    // The bridge-owned PDAs, derived from the configured bridge program id --
+    // here the mock. The program derives the same addresses and rejects
+    // anything else, so these must be right for the test to pass.
+    fn bridge_pda(&self) -> Pubkey {
+        Pubkey::find_program_address(&[b"Bridge"], &self.mock_wh).0
+    }
+
+    fn fee_collector_pda(&self) -> Pubkey {
+        Pubkey::find_program_address(&[b"fee_collector"], &self.mock_wh).0
+    }
+
+    fn sequence_pda(&self) -> Pubkey {
+        Pubkey::find_program_address(&[b"Sequence", self.emitter.as_ref()], &self.mock_wh).0
+    }
+
     fn sender_state(&self, authority: &Pubkey) -> Pubkey {
         Pubkey::find_program_address(&[SenderState::SEED, authority.as_ref()], &self.program_id).0
     }
@@ -148,11 +163,11 @@ impl Env {
                 message: self.message(authority, nonce),
                 authority: *authority,
                 payer: self.payer.pubkey(),
-                wormhole_bridge: Pubkey::new_unique(),
+                wormhole_bridge: self.bridge_pda(),
                 wormhole_message: wh_message.pubkey(),
                 wormhole_emitter: self.emitter,
-                wormhole_sequence: Pubkey::new_unique(),
-                wormhole_fee_collector: Pubkey::new_unique(),
+                wormhole_sequence: self.sequence_pda(),
+                wormhole_fee_collector: self.fee_collector_pda(),
                 wormhole_program: self.mock_wh,
                 clock: sysvar::clock::id(),
                 rent: sysvar::rent::id(),

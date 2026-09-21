@@ -42,9 +42,19 @@ interface IWormhole {
 /// the recommended second transport -- if every relayer stops, messages are
 /// still deliverable by hand. See docs/03-transport-comparison.md.
 contract WormholeAdapter is ITransportAdapter, Auth {
-    /// @notice Wormhole's own chain id for Solana. Verified: Solana = 1,
-    ///         Base = 30 in Wormhole's namespace.
+    /// @notice Wormhole's own chain id for Solana.
+    ///
+    /// Verified against the vendor's own published npm package
+    /// (wormhole-foundation/sdk-base): Solana 1, Ethereum 2, Base 30,
+    /// Base Sepolia 10004.
     uint16 public constant WORMHOLE_CHAIN_ID_SOLANA = 1;
+
+    /// @notice Consistency level meaning "finalized" on Solana.
+    ///
+    /// Verified against `wormhole-anchor-sdk`, whose `Finality` enum
+    /// serialises `Confirmed` to 0 and `Finalized` to 1. The Solana side
+    /// publishes at `Finality::Finalized`; this is the matching floor.
+    uint8 public constant CONSISTENCY_FINALIZED = 1;
 
     IWormhole public immutable wormhole;
     ISolanaGateway public immutable gateway;
@@ -58,9 +68,7 @@ contract WormholeAdapter is ITransportAdapter, Auth {
     /// This is the reorg guard and it is the setting most likely to be wrong in
     /// the unsafe direction, because the unsafe value is also the fast one: a
     /// message attested on a Solana slot that later gets rolled back is a free
-    /// forged call. Set this to the finalized level, never the confirmed one.
-    /// Confirm the exact numeric encoding against current Wormhole docs before
-    /// mainnet -- it was not verifiable from the environment this was written in.
+    /// forged call. Pass `CONSISTENCY_FINALIZED`; never 0 (confirmed).
     uint8 public minConsistencyLevel;
 
     mapping(bytes32 => bool) public consumedVaa;

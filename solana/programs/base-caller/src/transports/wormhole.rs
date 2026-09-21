@@ -1,34 +1,34 @@
 //! Wormhole core bridge transport.
 //!
 //! Publishes the envelope as a Wormhole message. The guardian network observes
-//! it, signs a VAA, and anyone can submit that VAA to `WormholeAdapter` on Base.
+//! it, signs a VAA, and anyone can submit that VAA to `WormholeAdapter` on the
+//! destination chain.
 //!
-//! STATUS: reference skeleton. The instruction discriminant, account ordering
-//! and fee mechanics below follow the core bridge's documented shape but were
-//! not verifiable from the environment this was written in. Check them against
-//! the deployed core bridge and an integration test on devnet before mainnet.
+//! The CPI is performed through `wormhole-anchor-sdk`, the bridge's own Anchor
+//! bindings, rather than by hand-encoding the instruction. That matters: the
+//! instruction discriminant, the order and mutability of the nine accounts,
+//! and the `Finality` encoding are all things this repo would otherwise be
+//! transcribing from documentation and silently getting wrong on the day the
+//! bridge changes them.
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{
-    instruction::{AccountMeta, Instruction},
-    program::{invoke, invoke_signed},
-    system_instruction,
-};
+use anchor_lang::solana_program::{program::invoke, system_instruction};
+use wormhole_anchor_sdk::wormhole::{self, BridgeData, Finality};
 
 use crate::state::TransportConfig;
 
-/// Core bridge `post_message` instruction discriminant.
-const IX_POST_MESSAGE: u8 = 1;
-
-/// Consistency level to publish at.
+/// Publish at finalized, never confirmed.
 ///
-/// This is the reorg guard, and it is the single most dangerous constant in the
-/// Solana half of the system: the unsafe value is also the fast one. A message
-/// attested on a slot that later gets rolled back is a forged call that every
-/// downstream check will happily accept. Publish at finalized, and make sure the
-/// Base-side `minConsistencyLevel` demands the same. Confirm the numeric
-/// encoding against current Wormhole docs.
-const CONSISTENCY_FINALIZED: u8 = 1;
+/// This is the reorg guard and it is the single most dangerous constant in the
+/// Solana half of the system, because the unsafe value is also the fast one. A
+/// message attested on a slot that is later rolled back is a forged call that
+/// every downstream check accepts. `Finality::Finalized` is the SDK's own
+/// encoding (it serialises to 1; `Confirmed` is 0), so this cannot drift from
+/// what the bridge expects.
+///
+/// The destination-side `WormholeAdapter.minConsistencyLevel` must demand the
+/// same. Two independent places, so a mistake in one is caught by the other.
+const FINALITY: Finality = Finality::Finalized;
 
 pub struct WormholeAccounts<'info> {
     pub bridge: AccountInfo<'info>,
@@ -52,7 +52,7 @@ pub fn post_message(
 ) -> Result<()> {
     // The bridge charges a per-message fee, collected by transfer to the fee
     // collector before the call.
-    let fee = read_message_fee(&accounts.bridge)?;
+    let fee = message_fee(&accounts.bridge)?;
     if fee > 0 {
         invoke(
             &system_instruction::transfer(accounts.payer.key, accounts.fee_collector.key, fee),
@@ -64,61 +64,49 @@ pub fn post_message(
         )?;
     }
 
-    let mut data = Vec::with_capacity(1 + 4 + 4 + envelope.len() + 1);
-    data.push(IX_POST_MESSAGE);
-    data.extend_from_slice(&batch_nonce.to_le_bytes());
-    data.extend_from_slice(&(envelope.len() as u32).to_le_bytes());
-    data.extend_from_slice(envelope);
-    data.push(CONSISTENCY_FINALIZED);
-
-    let ix = Instruction {
-        program_id: *accounts.program.key,
-        accounts: vec![
-            AccountMeta::new(*accounts.bridge.key, false),
-            AccountMeta::new(*accounts.message.key, true),
-            AccountMeta::new_readonly(*accounts.emitter.key, true),
-            AccountMeta::new(*accounts.sequence.key, false),
-            AccountMeta::new(*accounts.payer.key, true),
-            AccountMeta::new(*accounts.fee_collector.key, false),
-            AccountMeta::new_readonly(*accounts.clock.key, false),
-            AccountMeta::new_readonly(*accounts.system_program.key, false),
-            AccountMeta::new_readonly(*accounts.rent.key, false),
-        ],
-        data,
-    };
-
     // The emitter is a PDA of this program, so this program signs for it. That
-    // PDA is the identity `WormholeAdapter.solanaPeer` pins on Base -- it is the
-    // root of the whole trust chain and no external key can produce it.
-    invoke_signed(
-        &ix,
-        &[
-            accounts.bridge.clone(),
-            accounts.message.clone(),
-            accounts.emitter.clone(),
-            accounts.sequence.clone(),
-            accounts.payer.clone(),
-            accounts.fee_collector.clone(),
-            accounts.clock.clone(),
-            accounts.system_program.clone(),
-            accounts.rent.clone(),
-        ],
-        &[&[b"emitter", &[accounts.emitter_bump]]],
-    )?;
+    // PDA is the identity `WormholeAdapter.solanaPeer` pins on the destination
+    // chain -- the root of the whole trust chain, and one no external key can
+    // produce.
+    // Bound to a local: the seeds array must outlive the CpiContext.
+    let emitter_bump = [accounts.emitter_bump];
+    let emitter_seeds: &[&[u8]] = &[wormhole::SEED_PREFIX_EMITTER, &emitter_bump];
+    let signer_seeds: &[&[&[u8]]] = &[emitter_seeds];
 
-    Ok(())
+    let cpi = CpiContext::new_with_signer(
+        accounts.program.clone(),
+        wormhole::PostMessage {
+            config: accounts.bridge.clone(),
+            message: accounts.message.clone(),
+            emitter: accounts.emitter.clone(),
+            sequence: accounts.sequence.clone(),
+            payer: accounts.payer.clone(),
+            fee_collector: accounts.fee_collector.clone(),
+            clock: accounts.clock.clone(),
+            rent: accounts.rent.clone(),
+            system_program: accounts.system_program.clone(),
+        },
+        signer_seeds,
+    );
+
+    // The envelope goes over the wire byte for byte. Never re-wrap or re-encode
+    // it here: the destination hashes these bytes to derive the message id, so
+    // any change produces a different id for the same logical message and
+    // breaks both deduplication and the dual-transport quorum.
+    wormhole::post_message(cpi, batch_nonce, envelope.to_vec(), FINALITY)
 }
 
-/// Read the current message fee from the bridge config account.
-/// Layout: guardian_set_index (u32) | last_deployed (u32) | guardian_set_expiry
-/// (u32) | fee (u64 LE). Verify against the deployed bridge.
-fn read_message_fee(bridge: &AccountInfo) -> Result<u64> {
+/// Current per-message fee, read through the SDK's `BridgeData` layout rather
+/// than by indexing into the account at a hard-coded offset.
+///
+/// An empty account means no bridge is deployed there, which happens only
+/// against the localnet mock; the real bridge always carries config, and if a
+/// fee were somehow underpaid the bridge itself rejects the message.
+fn message_fee(bridge: &AccountInfo) -> Result<u64> {
     let data = bridge.try_borrow_data()?;
-    const FEE_OFFSET: usize = 4 + 4 + 4;
-    if data.len() < FEE_OFFSET + 8 {
+    if data.is_empty() {
         return Ok(0);
     }
-    let mut buf = [0u8; 8];
-    buf.copy_from_slice(&data[FEE_OFFSET..FEE_OFFSET + 8]);
-    Ok(u64::from_le_bytes(buf))
+    let mut slice: &[u8] = &data;
+    Ok(BridgeData::try_deserialize_unchecked(&mut slice)?.fee())
 }

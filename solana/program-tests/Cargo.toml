@@ -2,6 +2,7 @@
 name = "program-tests"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 publish = false
 
 # Deliberately its own workspace. solana-program-test drags in a modern

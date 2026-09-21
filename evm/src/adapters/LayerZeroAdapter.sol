@@ -24,9 +24,16 @@ struct Origin {
 /// change here, which is a materially better security story than a fixed
 /// validator set. See docs/03-transport-comparison.md.
 contract LayerZeroAdapter is ITransportAdapter, Auth {
-    /// @notice LayerZero v2 endpoint id for Solana mainnet. Verified: 30168.
-    ///         (Base mainnet is believed to be 30184 -- confirm before deploy.)
-    uint32 public constant SOLANA_EID = 30168;
+    /// @notice LayerZero v2 endpoint id of the source chain this adapter
+    ///         accepts messages from. Set at deploy so one implementation
+    ///         serves mainnet and testnet.
+    ///
+    /// Verified against the vendor's own published npm package
+    /// (layerzerolabs/lz-definitions), not documentation:
+    ///
+    ///   Solana mainnet  30168      Base mainnet   30184
+    ///   Solana devnet   40168      Base Sepolia   40245
+    uint32 public immutable SOLANA_EID;
 
     address public immutable endpoint;
     ISolanaGateway public immutable gateway;
@@ -38,7 +45,10 @@ contract LayerZeroAdapter is ITransportAdapter, Auth {
     error WrongSourceEid(uint32 eid);
     error WrongPeer(bytes32 peer);
 
-    constructor(address owner_, address endpoint_, address gateway_, bytes32 solanaPeer_) Auth(owner_) {
+    constructor(address owner_, address endpoint_, address gateway_, bytes32 solanaPeer_, uint32 solanaEid_)
+        Auth(owner_)
+    {
+        SOLANA_EID = solanaEid_;
         endpoint = endpoint_;
         gateway = ISolanaGateway(gateway_);
         solanaPeer = solanaPeer_;

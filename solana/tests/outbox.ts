@@ -25,6 +25,13 @@ describe("base_caller on localnet", () => {
     [Buffer.from("transport"), Buffer.from([TRANSPORT_WORMHOLE])], program.programId);
   const [emitter] = PublicKey.findProgramAddressSync([Buffer.from("emitter")], program.programId);
 
+  // Bridge-owned PDAs, derived from the configured bridge program id (here the
+  // mock). The program derives the same addresses and rejects anything else.
+  const [bridgePda] = PublicKey.findProgramAddressSync([Buffer.from("Bridge")], mock.programId);
+  const [feeCollectorPda] = PublicKey.findProgramAddressSync([Buffer.from("fee_collector")], mock.programId);
+  const [sequencePda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("Sequence"), emitter.toBuffer()], mock.programId);
+
   const authority = Keypair.generate();
   const senderState = PublicKey.findProgramAddressSync(
     [Buffer.from("sender"), authority.publicKey.toBuffer()], program.programId)[0];
@@ -84,11 +91,11 @@ describe("base_caller on localnet", () => {
     const dispatch = () => program.methods.dispatchViaWormhole(new anchor.BN(1), 0)
       .accountsPartial({
         config, transport, message: messagePda(1), authority: authority.publicKey, payer: payer.publicKey,
-        wormholeBridge: Keypair.generate().publicKey,
+        wormholeBridge: bridgePda,
         wormholeMessage: whMessage.publicKey,
         wormholeEmitter: emitter,
-        wormholeSequence: Keypair.generate().publicKey,
-        wormholeFeeCollector: Keypair.generate().publicKey,
+        wormholeSequence: sequencePda,
+        wormholeFeeCollector: feeCollectorPda,
         wormholeProgram: mock.programId,
         clock: SYSVAR_CLOCK_PUBKEY, rent: SYSVAR_RENT_PUBKEY, systemProgram: SystemProgram.programId,
       })
