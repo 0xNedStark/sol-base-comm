@@ -60,12 +60,20 @@ pub mod mock_transport {
     }
 
     /// Everything else -- the real bridge's instruction encodings -- lands here.
+    ///
+    /// Also returns a zeroed `MessagingReceipt` (guid [u8; 32], nonce u64,
+    /// fee { native u64, lz_token u64 } = 56 borsh bytes). LayerZero's
+    /// `endpoint_cpi::send` reads the endpoint's return data and unwraps it,
+    /// so a mock that returns nothing makes the CALLER panic rather than fail
+    /// cleanly. Wormhole's post_message ignores return data, so emitting it
+    /// unconditionally is harmless on that path.
     pub fn fallback(_program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Result<()> {
         msg!(
             "mock_transport: accepted {} bytes, {} accounts",
             data.len(),
             accounts.len()
         );
+        anchor_lang::solana_program::program::set_return_data(&[0u8; 56]);
         Ok(())
     }
 }

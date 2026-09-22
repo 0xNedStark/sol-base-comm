@@ -1,0 +1,11 @@
+[package]
+name = "base-caller-abi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Wire-level ABI of base_caller, for programs that cannot link it"
+
+# No dependencies, deliberately. Any program that needs to talk to base_caller
+# can depend on this regardless of which anchor-lang or solana-program version
+# it is built against.
+[dependencies]

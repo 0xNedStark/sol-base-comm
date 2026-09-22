@@ -7,9 +7,10 @@ read (v4 lockfiles, edition-2024 manifests, rust-version > 1.75). This script
 runs `cargo build-sbf` in a loop and, each time it names a crate it cannot
 handle, walks up the dependency tree to find something it can downgrade.
 
-Run after adding or updating any dependency:
+Run after adding or updating any dependency, from the workspace root:
 
-    python3 scripts/pin-lockfile.py
+    python3 ../scripts/pin-lockfile.py                     # the outbox workspace
+    python3 ../scripts/pin-lockfile.py programs/lz-dispatcher/Cargo.toml
 """
 import json
 import re
@@ -18,8 +19,19 @@ import sys
 import urllib.request
 
 MSRV = (1, 75)
-PROGRAMS = ("programs/base-caller/Cargo.toml", "programs/mock-transport/Cargo.toml")
-ROOTS = {"base-caller", "mock-transport", "anchor-lang", "solana-program", "wormhole-anchor-sdk"}
+DEFAULT_PROGRAMS = ("programs/base-caller/Cargo.toml", "programs/mock-transport/Cargo.toml")
+PROGRAMS = tuple(sys.argv[1:]) or DEFAULT_PROGRAMS
+ROOTS = {
+    "base-caller",
+    "base-caller-abi",
+    "mock-transport",
+    "lz-dispatcher",
+    "anchor-lang",
+    "solana-program",
+    "wormhole-anchor-sdk",
+    "oapp",
+    "endpoint",
+}
 
 # Ceilings the resolver cannot infer, because the crate declares no
 # rust-version that would rule the newer release out.

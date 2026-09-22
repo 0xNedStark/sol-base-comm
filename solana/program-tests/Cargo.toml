@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 anchor-lang = "0.30.1"
 base-caller = { path = "../programs/base-caller", features = ["no-entrypoint"] }
+base-caller-abi = { path = "../abi" }
 mock-transport = { path = "../programs/mock-transport", features = ["no-entrypoint"] }
 
 [dev-dependencies]

@@ -1,0 +1,15 @@
+[workspace]
+members = ["programs/*"]
+resolver = "2"
+
+# A separate workspace from ../ on purpose, and the whole reason this program
+# exists as its own program: LayerZero's endpoint pins
+# solana-program = "=1.17.31" and anchor-lang 0.29, while the outbox uses the
+# Wormhole Anchor SDK on 1.18 / 0.30.1. solana-program can appear once per
+# binary, so the two stacks cannot meet. They meet at the PreparedMessage
+# account instead, through the dependency-free base-caller-abi crate.
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

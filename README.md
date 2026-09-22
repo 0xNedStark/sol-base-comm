@@ -103,9 +103,16 @@ solana/programs/base-caller/src/
   transports/               wormhole.rs (official SDK), layerzero.rs (see below)
 solana/programs/mock-transport/
                             localnet stand-in for a bridge: accepts any instruction
-solana/program-tests/       BanksClient tests against the real .so (own workspace)
+solana/abi/                 base-caller-abi: dependency-free wire ABI, linkable
+                            from any anchor/solana version
+solana/layerzero-dispatcher/
+                            external LayerZero dispatcher, own workspace,
+                            anchor 0.29 / solana 1.17.31, real oapp SDK
+solana/program-tests/       15 BanksClient tests against the real .so files
+                            (outbox 7, abi guard 5, cross-version dispatch 3)
 solana/scripts/pin-lockfile.py
                             re-pins Cargo.lock after any dependency change
+solana/scripts/build-all.sh builds both workspaces into one target/deploy
 solana/tests/outbox.ts      TypeScript end-to-end through the Anchor client
 ```
 
@@ -145,7 +152,7 @@ This is a design plus a reference implementation, not audited production code.
 | Cross-language parity | **verified** — Solidity offsets/shifts checked against the bytes Rust actually emits |
 | Anchor program | **builds for SBF and executes**: 7 program-tests through BanksClient on the real binary, and 4 TypeScript tests through the Anchor client on `solana-test-validator` |
 | `transports/wormhole.rs` | uses `wormhole-anchor-sdk`, the bridge's own bindings: instruction layout, account order and `Finality` come from the source |
-| `transports/layerzero.rs` | **cannot be in-process** — LayerZero's endpoint pins `solana-program = "=1.17.31"` against Wormhole's 1.18. Ships as an external dispatcher program instead (see below) |
+| `transports/layerzero.rs` | **cannot be in-process** — see below. Superseded by `solana/layerzero-dispatcher`, which **builds against the real `oapp` SDK** and passes 3 cross-version integration tests |
 | Testnet end to end | **not done** — the one thing nothing above covers |
 
 **Transport constants are verified**, read from the vendors' own published npm
@@ -177,12 +184,34 @@ linked in ships as its own program: it reads the prepared envelope, forwards
 those bytes to its endpoint, and calls `mark_dispatched` on the outbox,
 signing as a PDA of itself that the outbox has registered. The envelope is
 never re-derived, so the message id is identical to the in-process path and
-the dual-transport quorum still works. `programs/mock-transport` demonstrates
-the callback; `external_dispatcher_marks_a_transport_without_being_linked_in`
-proves the envelope is unchanged.
+the dual-transport quorum still works.
 
 Transport ids map to bitmask bits arithmetically, so registering an external
 transport is an admin action with **no upgrade to the outbox**.
+
+### `solana/layerzero-dispatcher` — the real thing
+
+Its own workspace, built against LayerZero's actual `oapp` crate from their
+git repo, resolving to anchor 0.29 / solana-program 1.17.31 with no
+interference from the outbox's stack.
+
+| Concern | How it is handled |
+|---|---|
+| Reading the outbox's state | `base-caller-abi`, a crate with **no dependencies at all**, so either stack can link it. Holds the instruction discriminator and `PreparedMessage` offsets |
+| That ABI drifting | The outbox's test suite asserts its real Anchor-derived discriminators, seeds and field offsets still match every constant in that crate. Rename an instruction and the build fails |
+| The envelope being altered | Forwarded verbatim to `oapp::endpoint_cpi::send`; a test asserts the bytes are unchanged after dispatch |
+| Executor gas disagreeing with the envelope | Options are built **in-program** from the envelope's own `gasLimit`, never taken as a client argument. The encoder is checked byte-for-byte against LayerZero's own TypeScript builder |
+| Being handed a forged message | The account must be owned by the configured outbox and carry the right discriminator |
+
+Three integration tests load all three programs into one validator — which
+works precisely because the version conflict is a property of a *binary*, not
+of a transaction — and drive
+`lz_dispatcher` → endpoint → `base_caller.mark_dispatched`.
+
+**Not yet exercised against the real endpoint.** The send path runs against a
+mock, so what is proven is the ABI, the ownership checks, the options encoding
+and the callback. Landing a message on a live endpoint is part of the testnet
+step.
 
 ## Running the checks
 
@@ -195,8 +224,9 @@ cd solana && cargo check -p base-caller
 
 # Solana, full: SBF build, IDL, program-tests, and the localnet end-to-end
 cd solana && npm install
-npm run build                                   # cargo build-sbf + IDL + TS types
-(cd program-tests && SBF_OUT_DIR=../target/deploy cargo test)   # BanksClient, real .so
+npm run build:all                               # all three programs, both workspaces
+npm run test:programs                           # 15 BanksClient tests on the real .so
+npm run build                                   # + IDL and TypeScript types
 solana-test-validator -r \
   --bpf-program $(grep ^base_caller Anchor.toml | cut -d'"' -f2) target/deploy/base_caller.so \
   --bpf-program $(grep ^mock_transport Anchor.toml | cut -d'"' -f2) target/deploy/mock_transport.so &
@@ -231,9 +261,8 @@ enforced in the gateway -- revert only when redelivery could succeed.
 
 1. One message end to end on devnet -> Base Sepolia over one adapter. Needs
    funded keys and RPC endpoints.
-2. Build the LayerZero dispatcher as its own program against `oapp`
-   (anchor 0.29 / solana 1.17) or `oapp-latest` (anchor 0.32 / solana 2.3),
-   and register it with `set_transport`. No outbox change needed.
+2. Point the dispatcher at a real LayerZero endpoint and land a message; the
+   send path has only been exercised against a mock.
 4. Choose the two independent DVN operators for the mainnet config path.
 5. Key transport config by (transport, destination) before a second chain.
 6. Audit before mainnet.

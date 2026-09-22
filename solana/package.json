@@ -4,7 +4,9 @@
   "scripts": {
     "build": "RUSTUP_TOOLCHAIN=1.85.0 anchor build",
     "test": "RUSTUP_TOOLCHAIN=1.85.0 anchor test",
-    "test:skip-build": "RUSTUP_TOOLCHAIN=1.85.0 anchor test --skip-build"
+    "test:skip-build": "RUSTUP_TOOLCHAIN=1.85.0 anchor test --skip-build",
+    "build:all": "bash scripts/build-all.sh",
+    "test:programs": "bash scripts/build-all.sh && cd program-tests && SBF_OUT_DIR=../target/deploy cargo test"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1"

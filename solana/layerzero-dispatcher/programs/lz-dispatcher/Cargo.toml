@@ -1,0 +1,25 @@
+[package]
+name = "lz-dispatcher"
+version = "0.1.0"
+description = "External LayerZero dispatcher for the base_caller outbox"
+edition = "2021"
+rust-version = "1.75"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "lz_dispatcher"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+
+[dependencies]
+# Pinned by oapp, not by us: the LayerZero endpoint requires exactly these.
+anchor-lang = "0.29.0"
+oapp = { git = "https://github.com/LayerZero-Labs/LayerZero-v2" }
+# No anchor or solana dependency of its own, so it links into either stack.
+base-caller-abi = { path = "../../../abi" }

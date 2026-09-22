@@ -1,0 +1,4 @@
+# Same policy as the outbox workspace: let the resolver honour rust-version so
+# it does not lock crates the SBF toolchain (rustc 1.75) cannot build.
+[resolver]
+incompatible-rust-versions = "fallback"
