@@ -8,6 +8,7 @@ solana/program-tests/Cargo.lock
 
 # Node / Foundry
 node_modules/
+evm/deployments/
 evm/test/out/
 out/
 cache/

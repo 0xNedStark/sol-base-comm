@@ -1,0 +1,11 @@
+{
+  "name": "sol-base-comm-relayer",
+  "private": true,
+  "description": "Carries Wormhole VAAs from Solana to the destination chain",
+  "scripts": {
+    "relay": "node wormhole-relay.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0"
+  }
+}

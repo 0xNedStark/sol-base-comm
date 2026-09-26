@@ -9,7 +9,8 @@
     "test:programs": "bash scripts/build-all.sh && cd program-tests && SBF_OUT_DIR=../target/deploy cargo test"
   },
   "dependencies": {
-    "@coral-xyz/anchor": "^0.30.1"
+    "@coral-xyz/anchor": "^0.30.1",
+    "@solana/web3.js": "^1.99.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",

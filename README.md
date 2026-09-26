@@ -76,6 +76,7 @@ for both, which is what makes `requiredConfirmations = 2` reachable.
 | [`docs/03-transport-comparison.md`](docs/03-transport-comparison.md) | Wormhole vs LayerZero vs Hyperlane vs CCIP vs Axelar, and the recommendation |
 | [`docs/04-security.md`](docs/04-security.md) | Threat model and pre-deployment checklist |
 | [`docs/05-operations.md`](docs/05-operations.md) | Deploy order, relayer, monitoring, incident response |
+| [`docs/06-testnet-run.md`](docs/06-testnet-run.md) | **The four testnet steps**, what you need for each, and what will probably go wrong |
 
 ## Layout
 

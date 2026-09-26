@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "node test/build.js",
-    "test": "node test/build.js && node test/gateway.test.js && node test/envelope-parity.js"
+    "test": "node test/build.js && node test/gateway.test.js && node test/deploy.test.js && node test/envelope-parity.js",
+    "deploy": "node script/deploy.js"
   },
   "keywords": [],
   "author": "",

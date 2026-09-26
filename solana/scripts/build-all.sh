@@ -16,5 +16,8 @@ cargo build-sbf --manifest-path programs/mock-transport/Cargo.toml
 echo "==> layerzero dispatcher (anchor 0.29 / solana 1.17.31)"
 (cd layerzero-dispatcher && cargo build-sbf --manifest-path programs/lz-dispatcher/Cargo.toml)
 cp layerzero-dispatcher/target/deploy/lz_dispatcher.so target/deploy/
+# The keypair too: it is the program's identity, and the destination-chain
+# adapters pin PDAs derived from it.
+cp layerzero-dispatcher/target/deploy/lz_dispatcher-keypair.json target/deploy/ 2>/dev/null || true
 
 ls -la target/deploy/*.so
