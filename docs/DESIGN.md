@@ -11,11 +11,11 @@
 
 *A general design for invoking contract functions on an EVM chain from a Solana program.*
 
-2026-09-18 · @Someone
+Sep 18, 2026 · @Ned Stark
 
 ## Where we are
 
-Phase one is implemented and verified on both chains in-process and on a local validator. The one remaining phase-one exit criterion is a message landing end to end on **public** testnets, which needs funded keys and RPC endpoints. All four open design questions are answered and their consequences are in the code.
+Both transports are now built, on both chains, and verified locally. What has never happened is a message crossing a real network: every test here runs against an in-process EVM, a local validator, or a mock endpoint. That is the whole of what remains in phase one, and it needs funded keys rather than more code. All four open design questions are answered and their consequences are in the code.
 
 ### Implementation status
 
@@ -24,13 +24,13 @@ Phase one is implemented and verified on both chains in-process and on a local v
 | Envelope codec, Rust and Solidity | Done | 5 unit tests, frozen golden vector, cross-language parity on the 103-byte layout |
 | Gateway | Done, phase-one scope | 28 behaviour tests on an in-process Cancun EVM |
 | Callable base + config-invoke target | Done | Covered by the gateway tests, including the version-guard flow end to end |
-| Transport constants | **Verified** | Read from the vendors' own published npm packages, not documentation |
-| Wormhole transport (Solana) | Done | Uses `wormhole-anchor-sdk`, the bridge's own bindings; CPI exercised against a mock |
+| Transport constants | Verified | Read from the vendors' own published npm packages, not documentation |
 | Outbox program: prepare / dispatch / finalize / mark\_dispatched | Done, executes | Real SBF build; 7 program-tests through BanksClient; 4 TypeScript tests on `solana-test-validator` |
-| External dispatcher interface | Done | A separate program drives a transport and calls back, with the envelope proven unchanged |
-| Adapters (Wormhole, LayerZero) | Written, compile | Not yet exercised against real transport contracts |
-| LayerZero transport (Solana) | **Blocked in-process**; must be an external dispatcher | Dependency conflict proven by attempting the build |
-| Testnet end to end | Not started | Needs funded devnet and Base Sepolia keys |
+| Wormhole transport (Solana, in-process) | Done | Uses `wormhole-anchor-sdk`, the bridge's own bindings; CPI exercised against a mock |
+| LayerZero dispatcher (Solana, external program) | **Built** | Compiles against the real `oapp` SDK on its own stack; 3 cross-version integration tests |
+| Published ABI between the two | Done | 5 tests assert the outbox's real discriminators, seeds and field offsets still match |
+| Adapters (Wormhole, LayerZero) on the destination | Written, compile | Not yet exercised against real transport contracts |
+| **A message over a real network** | **Not started** | — needs funded devnet and Base Sepolia keys |
 
 ### Phase progress
 
@@ -48,21 +48,28 @@ Phase one is implemented and verified on both chains in-process and on a local v
 
 **Source side.** The real SBF binary, not a native re-entry: `prepare` assigns nonce 1 and stores an envelope whose header decodes field by field to the spec; `dispatch` performs the CPI with the PDA-signed emitter and sets the transport bit; a second dispatch over the same transport is refused; dispatch over a transport not selected at prepare is refused; `finalize` before every expected transport has dispatched is refused; `finalize` closes the account and refunds rent to the original payer; the next `prepare` is nonce 2, so nonces are gapless. The same flow passes through the TypeScript client against a running validator, which is what an integrator will actually use.
 
+**Across the version boundary.** Three programs — the outbox on anchor 0.30.1, the LayerZero dispatcher on anchor 0.29, and a mock endpoint — load into one validator and one CPI chain. That they coexist at all is the point being tested: the dependency conflict is a property of a binary, not of a transaction. The tests assert that the dispatcher sets the transport bit through the raw ABI, that the envelope is byte-identical afterwards (so the destination derives the same message id as for an in-process transport and the quorum survives the program boundary), and that a message the outbox does not own is refused.
+
+**What no local test covers.** The LayerZero send path runs against a mock endpoint that accepts anything. The account list a live endpoint requires — send-library configs, the nonce PDA, the event authority — is built by LayerZero's SDK from real deployments, and the tests pass placeholders. What is proven is the ABI, the ownership and PDA checks, the options encoding and the callback; what is not is that a real endpoint accepts the call.
+
 ### Found during implementation
 
-- **LayerZero and Wormhole cannot share a Solana program.** LayerZero's endpoint pins `solana-program = "=1.17.31"`; the Wormhole Anchor SDK needs 1.18. Attempting the dependency is what proved it. The design assumed both transports would be instructions of one program; they cannot be, and the external-dispatcher interface above is the answer.
+- **LayerZero and Wormhole cannot share a Solana program.** LayerZero's endpoint pins `solana-program = "=1.17.31"`; the Wormhole Anchor SDK needs 1.18. Attempting the dependency is what proved it. The design assumed both transports would be instructions of one program; they cannot be, and the external-dispatcher interface is the answer.
+- **Two programs that cannot share types must share bytes, and that is the thing most likely to rot silently.** The dispatcher hard-codes the outbox's instruction discriminator and `PreparedMessage` offsets. Those now live in a crate with no dependencies at all, and the outbox's own suite asserts its real Anchor-derived values still match every constant there — so renaming an instruction fails the build rather than sending a dispatcher to read the wrong bytes against a live bridge.
+- **Executor gas could have silently disagreed with the envelope.** Taking LayerZero options as a client argument would let a client pay for 50k while the envelope promises 300k, and the call would run out of gas on arrival for reasons invisible from Solana. Options are built in-program from the envelope's own bytes, and the encoder is checked byte-for-byte against LayerZero's own TypeScript builder.
 - The transport constants the design had marked unverified are verifiable after all: the vendors publish them in npm packages, and npm is not behind the egress proxy that blocks their documentation sites. Base's LayerZero endpoint id is 30184 as believed; Wormhole's `Finality` enum serialises `Finalized` to 1, so the consistency level was right.
 - Switching the Wormhole CPI to the bridge's own SDK removed two hand-rolled things worth removing: a fee read at a hard-coded byte offset, and three bridge accounts that were unchecked and are now derived from the configured program id.
+- Two smaller things the endpoint wiring surfaced: its `Send` declares the nonce account mutable, so the outer instruction must grant that or the runtime rejects the CPI for privilege escalation; and `oapp`'s send unwraps the endpoint's return data, so a mock returning nothing panics the caller rather than failing cleanly.
 - Three real Anchor errors that reading could not catch and `cargo check` did: a 31-byte placeholder program id, a missing `init-if-needed` cargo feature, and a mutable borrow held across a second borrow of the context in both dispatch instructions.
 - Two `#[error_code]` enums both defaulted to offset 6000 and would have produced colliding error codes; merged.
 - A DIRECT-mode call targeting another sender's smart account would have driven its `execute()` with the gateway as the trusted caller. Every deployed account is now a forbidden target, and the drain attempt is a test.
-- Getting Anchor 0.30.1 to build on a 2026 host took four separate fixes, each now captured in the repo rather than in someone's memory: the SBF toolchain's cargo cannot read v4 lockfiles; the host resolver locks crates the SBF toolchain cannot build; Anchor's IDL step runs on `cargo +nightly` and needs a nightly from before April 2025; and `solana-program-test`'s dependency tree has to live in its own workspace. `scripts/pin-lockfile.py` now automates the lockfile half of that.
+- Getting Anchor 0.30.1 to build on a 2026 host took four separate fixes, each captured in the repo rather than in someone's memory. `scripts/pin-lockfile.py` automates the lockfile half, including version ceilings the resolver cannot infer.
 - Foundry is unreachable from the build environment; the gateway suite runs on `@ethereumjs/vm` and is portable to Foundry when available.
 
 ### Next
 
-1. One message end to end, devnet to Base Sepolia, over Wormhole. That path is complete in code; it needs funded keys and RPC endpoints.
-2. Build the LayerZero dispatcher as its own program against `oapp` (anchor 0.29 / solana 1.17) or `oapp-latest` (anchor 0.32 / solana 2.3), and register it with `set_transport`. No change to the outbox.
+1. **Land one message on public testnets.** Devnet to Base Sepolia, over Wormhole first — that path is complete and self-relayable. Needs a funded devnet keypair, a Base Sepolia deployer key and RPC endpoints. Nothing else in phase one is blocked on code.
+2. Point the dispatcher at a real LayerZero endpoint. The send path has only met a mock, and the endpoint's real account list comes from their SDK against live deployments.
 3. Choose the two independent DVN operators for the mainnet configuration path.
 4. Key transport configuration by (transport, destination) before a second destination chain.
 5. Audit before mainnet.
